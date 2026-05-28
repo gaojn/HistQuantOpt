@@ -1,0 +1,284 @@
+"""
+指数增强组合优化器（QP）。
+
+目标函数：
+    max  w'α  -  γ · ‖w − w_bm‖²
+
+    w'α              : 组合预期收益
+    γ·‖w−w_bm‖²      : 跟踪误差代理（L2 偏离基准的惩罚）
+                       γ 越大 → 越贴近基准（被动），γ 越小 → 越主动
+
+约束体系（相对基准）：
+    sum(w)                  = 1
+    0 ≤ w_i                 ≤ W_max
+    sum(w[const])           ≥ R_min                      成分股下限（如 HS300 ≥ 80%）
+    |Σ_{i∈ind_k}(w_i-w_bm_i)| ≤ I_active                行业主动偏离 (±5%)
+    |B_style[:,k]'(w-w_bm)| ≤ S_active                  风格主动暴露 (±0.3σ)
+    ‖w − w_prev‖₁           ≤ T_max                     双边换手率
+    w[停牌/ST/次新]          = 0                         交易状态
+
+求解器：CLARABEL
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import cvxpy as cp
+import numpy as np
+import pandas as pd
+
+from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
+
+
+@dataclass
+class IndexEnhanceConfig:
+    """
+    指数增强参数（推荐 HS300 默认）。
+
+    Parameters
+    ----------
+    weight_upper : float
+        单票绝对权重上限（默认 5%，容纳基准重仓股如茅台/宁德 ~5%）
+    weight_lower : float
+        单票权重下限，默认 0
+    min_constituent_ratio : float
+        成分股权重下限（HS300 ≥ 80%）
+    industry_active_bound : float
+        行业相对基准偏离上限（±5%）
+    style_active_bound : float
+        风格因子主动暴露上限（±0.3σ）
+    tracking_penalty : float
+        跟踪误差惩罚系数 γ（越大越像基准）
+    max_turnover : float | None
+        双边换手率上限（默认 20%）
+    """
+    weight_upper: float = 0.05
+    weight_lower: float = 0.0
+    min_constituent_ratio: float = 0.80
+    industry_active_bound: float = 0.05
+    style_active_bound: float = 0.30
+    tracking_penalty: float = 10.0
+    max_turnover: float | None = 0.20
+    weight_diff_l2_bound: float | None = None   # ‖w-w_bm‖₂ 硬约束上限
+
+
+class IndexEnhanceOptimizer:
+    """指数增强优化器。"""
+
+    def __init__(self, config: IndexEnhanceConfig) -> None:
+        self.config = config
+
+    def optimize(
+        self,
+        alpha: np.ndarray,
+        snapshot: MarketSnapshot,
+        benchmark_weight: np.ndarray,
+        style_loading: pd.DataFrame | None = None,
+        prev_weight: np.ndarray | None = None,
+    ) -> "IndexEnhanceResult":
+        cfg = self.config
+        tickers = snapshot.tickers
+        n = len(tickers)
+
+        alpha = np.array(alpha, dtype=float)
+        w_bm = np.array(benchmark_weight, dtype=float)
+        # 基准权重归一化（防浮点偏差）
+        bm_sum = w_bm.sum()
+        if bm_sum > 1e-8:
+            w_bm = w_bm / bm_sum
+
+        # 禁止持仓
+        banned_status = {TradingStatus.SUSPENDED, TradingStatus.NEW_LISTING}
+        banned_mask = np.array(
+            [s in banned_status for s in snapshot.status.values], dtype=bool
+        )
+        alpha[banned_mask] = 0.0
+
+        w = cp.Variable(n, name="w", nonneg=True)
+        constraints = []
+
+        # 1. 预算
+        constraints.append(cp.sum(w) == 1.0)
+
+        # 2. 个股区间
+        constraints.append(w <= cfg.weight_upper)
+
+        # 3. 禁止持仓
+        for i in np.where(banned_mask)[0]:
+            constraints.append(w[i] == 0.0)
+
+        # 4. 成分股权重下限
+        if snapshot.is_constituent is not None and cfg.min_constituent_ratio > 0:
+            const_idx = np.where(snapshot.constituent_mask)[0]
+            if len(const_idx) > 0:
+                constraints.append(
+                    cp.sum(w[const_idx]) >= cfg.min_constituent_ratio
+                )
+
+        # 5. 行业相对基准偏离
+        industries = snapshot.industry.reindex(tickers).fillna("未知")
+        for ind_name in industries.unique():
+            idx = np.where(industries.values == ind_name)[0]
+            if len(idx) == 0:
+                continue
+            bm_ind = float(w_bm[idx].sum())
+            active_ind = cp.sum(w[idx]) - bm_ind
+            constraints.append(active_ind <= cfg.industry_active_bound)
+            constraints.append(active_ind >= -cfg.industry_active_bound)
+
+        # 6. 风格因子主动暴露
+        if style_loading is not None:
+            B = style_loading.reindex(tickers).fillna(0.0).values  # (N, K)
+            active_exp = B.T @ (w - w_bm)
+            constraints.append(active_exp <= cfg.style_active_bound)
+            constraints.append(active_exp >= -cfg.style_active_bound)
+
+        # 7. 换手
+        if prev_weight is not None and cfg.max_turnover is not None:
+            w_prev = np.array(prev_weight, dtype=float)
+            constraints.append(cp.sum(cp.abs(w - w_prev)) <= cfg.max_turnover)
+
+        # 8. L2 偏离基准硬约束（TE 代理）
+        if cfg.weight_diff_l2_bound is not None:
+            constraints.append(cp.norm(w - w_bm, 2) <= cfg.weight_diff_l2_bound)
+
+        # 目标函数
+        objective = cp.Maximize(
+            alpha @ w - cfg.tracking_penalty * cp.sum_squares(w - w_bm)
+        )
+
+        prob = cp.Problem(objective, constraints)
+        # 优先 CLARABEL（max_iter 提至 500，应对大规模候选池）；
+        # 失败时降级 SCS 兜底
+        # 优先 CLARABEL，失败再尝试 SCS 兜底
+        clarabel_ok = False
+        try:
+            prob.solve(solver=cp.CLARABEL, max_iter=500, verbose=False)
+            clarabel_ok = prob.status in ("optimal", "optimal_inaccurate")
+        except Exception:
+            clarabel_ok = False
+
+        if not clarabel_ok:
+            try:
+                prob.solve(solver=cp.SCS, max_iters=10000, verbose=False)
+            except Exception as e:
+                return IndexEnhanceResult.infeasible(tickers, f"both solvers failed: {e}")
+
+        if prob.status not in ("optimal", "optimal_inaccurate"):
+            return IndexEnhanceResult.infeasible(tickers, prob.status)
+
+        weights = np.clip(np.array(w.value, dtype=float), 0.0, None)
+        if weights.sum() > 1e-8:
+            weights /= weights.sum()
+
+        return IndexEnhanceResult(
+            tickers=tickers,
+            weights=weights,
+            status=prob.status,
+            objective_value=float(prob.value),
+            snapshot=snapshot,
+            benchmark_weight=w_bm,
+        )
+
+
+@dataclass
+class IndexEnhanceResult:
+    """指数增强优化结果。"""
+    tickers: list[str]
+    weights: np.ndarray
+    status: str
+    objective_value: float
+    snapshot: MarketSnapshot | None
+    benchmark_weight: np.ndarray | None = None
+
+    @classmethod
+    def infeasible(cls, tickers: list[str], reason: str) -> "IndexEnhanceResult":
+        return cls(
+            tickers=tickers,
+            weights=np.zeros(len(tickers)),
+            status=f"infeasible: {reason}",
+            objective_value=float("nan"),
+            snapshot=None,
+            benchmark_weight=None,
+        )
+
+    @property
+    def is_feasible(self) -> bool:
+        return "optimal" in self.status
+
+    @property
+    def n_positions(self) -> int:
+        return int((self.weights > 1e-6).sum())
+
+    @property
+    def active_weight(self) -> np.ndarray | None:
+        if self.benchmark_weight is None:
+            return None
+        return self.weights - self.benchmark_weight
+
+    def to_series(self) -> pd.Series:
+        return pd.Series(self.weights, index=self.tickers, name="weight")
+
+    def top_holdings(self, n: int = 10) -> pd.DataFrame:
+        s = self.to_series().sort_values(ascending=False).head(n)
+        df = s.to_frame("weight")
+        df["weight_pct"] = df["weight"] * 100
+        if self.snapshot is not None:
+            df["industry"] = self.snapshot.industry.reindex(s.index)
+            if self.snapshot.is_constituent is not None:
+                df["is_constituent"] = self.snapshot.is_constituent.reindex(s.index)
+        if self.benchmark_weight is not None:
+            bm_s = pd.Series(self.benchmark_weight * 100, index=self.tickers)
+            df["bm_weight_pct"] = bm_s.reindex(s.index)
+            df["active_pct"]    = df["weight_pct"] - df["bm_weight_pct"]
+        return df
+
+    def style_active_exposure(self, style_loading: pd.DataFrame) -> pd.Series:
+        """组合相对基准的风格主动暴露。"""
+        if self.benchmark_weight is None:
+            return pd.Series(dtype=float)
+        B = style_loading.reindex(self.tickers).fillna(0.0)
+        active = pd.Series(
+            self.weights - self.benchmark_weight, index=self.tickers
+        )
+        return B.T @ active
+
+    def industry_active_weights(self) -> pd.Series:
+        """各行业相对基准的主动权重偏离（正=超配，负=低配）。"""
+        if self.snapshot is None or self.benchmark_weight is None:
+            return pd.Series(dtype=float)
+        ind = self.snapshot.industry.reindex(self.tickers).fillna("未知")
+        port = pd.Series(self.weights, index=self.tickers).groupby(ind.values).sum()
+        bm   = pd.Series(self.benchmark_weight, index=self.tickers).groupby(ind.values).sum()
+        return (port - bm).sort_values(ascending=False)
+
+    def industry_weights(self) -> pd.Series:
+        """各行业绝对权重。"""
+        if self.snapshot is None:
+            return pd.Series(dtype=float)
+        ind = self.snapshot.industry.reindex(self.tickers).fillna("未知")
+        return pd.Series(self.weights, index=self.tickers) \
+            .groupby(ind.values).sum().sort_values(ascending=False)
+
+    def tracking_error_l2(self) -> float:
+        """跟踪误差 L2 范数（粗略代理）。"""
+        if self.benchmark_weight is None:
+            return float("nan")
+        return float(np.linalg.norm(self.weights - self.benchmark_weight))
+
+    def summary(self) -> str:
+        lines = [
+            f"状态           : {self.status}",
+            f"持仓数         : {self.n_positions}",
+            f"权重和         : {self.weights.sum():.6f}",
+            f"最大单票       : {self.weights.max()*100:.3f}%",
+        ]
+        if self.snapshot is not None and self.snapshot.is_constituent is not None:
+            const_w = self.weights[self.snapshot.constituent_mask].sum()
+            lines.append(f"HS300 权重     : {const_w*100:.2f}%")
+        if self.benchmark_weight is not None:
+            active_l1 = float(np.abs(self.weights - self.benchmark_weight).sum())
+            lines.append(f"主动权重 L1    : {active_l1:.4f}")
+            lines.append(f"主动权重 L2    : {self.tracking_error_l2():.4f}")
+        return "\n".join(lines)

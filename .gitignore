@@ -1,0 +1,22 @@
+# 大文件 / 数据缓存（不入版本控制）
+data/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.env
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# 测试缓存
+.pytest_cache/
+.coverage
