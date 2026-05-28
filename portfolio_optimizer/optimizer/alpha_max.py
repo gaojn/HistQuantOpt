@@ -119,6 +119,10 @@ class AlphaMaxOptimizer:
         # 禁止股票 alpha 清零，避免干扰目标函数方向
         alpha[banned_mask] = 0.0
 
+        # 涨停：不可加仓；跌停：不可减仓
+        lup_mask = snapshot.limit_up_mask
+        ldn_mask = snapshot.limit_down_mask
+
         w = cp.Variable(n, name="w", nonneg=True)
         constraints = []
 
@@ -132,6 +136,14 @@ class AlphaMaxOptimizer:
         banned_idx = np.where(banned_mask)[0]
         for i in banned_idx:
             constraints.append(w[i] == 0.0)
+
+        # ---- 3b. 涨跌停约束（依赖上期权重）----
+        if prev_weight is not None:
+            w_prev_arr = np.array(prev_weight, dtype=float)
+            for i in np.where(lup_mask)[0]:
+                constraints.append(w[i] <= float(w_prev_arr[i]))   # 涨停：不可加仓
+            for i in np.where(ldn_mask)[0]:
+                constraints.append(w[i] >= float(w_prev_arr[i]))   # 跌停：不可减仓
 
         # ---- 4. 行业绝对权重上限 ----
         industries = snapshot.industry.reindex(tickers).fillna("未知")

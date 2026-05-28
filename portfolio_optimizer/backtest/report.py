@@ -209,35 +209,52 @@ def _build_overall_card(result: BacktestResult) -> str:
     pm = result.portfolio_metrics
     bm = result.benchmark_metrics
 
-    cards = [
-        ("年化收益",    f"{pm.annual_return*100:+.2f}%",       f"基准 {bm.annual_return*100:+.2f}%"),
-        ("年化波动",    f"{pm.annual_vol*100:.2f}%",            f"基准 {bm.annual_vol*100:.2f}%"),
-        ("Sharpe",     f"{pm.sharpe:.3f}",                     f"基准 {bm.sharpe:.3f}"),
-        ("最大回撤",    f"{pm.max_drawdown*100:.2f}%",          f"基准 {bm.max_drawdown*100:.2f}%"),
-        ("Calmar",     f"{pm.calmar:.3f}",                     f"基准 {bm.calmar:.3f}"),
-        ("年化超额",    f"{pm.annual_excess_return*100:+.2f}%", "—"),
-        ("跟踪误差TE",  f"{pm.tracking_error*100:.2f}%",        "—"),
-        ("信息比率IR",  f"{pm.info_ratio:.3f}",                 "—"),
-        ("超额最大回撤", f"{pm.excess_max_drawdown*100:.2f}%",  "—"),
-        ("超额Calmar",  f"{pm.excess_calmar:.3f}",              "—"),
-        ("月度胜率",    f"{pm.win_rate_monthly*100:.1f}%",      "—"),
-        ("月均超额",    f"{pm.avg_monthly_excess*100:+.3f}%",   "—"),
-    ]
+    def card(title: str, value: str, sub: str = "—", accent: str = "#95a5a6") -> str:
+        sc = "positive" if value.startswith("+") else ("negative" if value.startswith("-") else "")
+        return (
+            f'<div class="metric-card" style="border-left-color:{accent}">'
+            f'<div class="metric-title">{title}</div>'
+            f'<div class="metric-value {sc}">{value}</div>'
+            f'<div class="metric-sub">{sub}</div>'
+            f'</div>'
+        )
 
-    html = '<div class="metric-grid">'
-    for title, value, sub in cards:
-        sign_class = ""
-        if value.startswith("+"):  sign_class = "positive"
-        elif value.startswith("-"): sign_class = "negative"
-        html += f"""
-        <div class="metric-card">
-            <div class="metric-title">{title}</div>
-            <div class="metric-value {sign_class}">{value}</div>
-            <div class="metric-sub">{sub}</div>
-        </div>
-        """
-    html += "</div>"
-    return html
+    def group(label: str, cols: int, *cards_html: str) -> str:
+        return (
+            f'<div class="metric-group-label">{label}</div>'
+            f'<div class="metric-grid" style="grid-template-columns:repeat({cols},1fr)">'
+            + "".join(cards_html)
+            + "</div>"
+        )
+
+    # ── 第一组：基础绩效 ──
+    g1 = group(
+        "基础绩效", 4,
+        card("年化收益",  f"{pm.annual_return*100:+.2f}%",  f"基准 {bm.annual_return*100:+.2f}%",  "#e74c3c"),
+        card("年化波动",  f"{pm.annual_vol*100:.2f}%",       f"基准 {bm.annual_vol*100:.2f}%",       "#95a5a6"),
+        card("Sharpe",   f"{pm.sharpe:.2f}",                f"基准 {bm.sharpe:.2f}",                "#f39c12"),
+        card("Calmar",   f"{pm.calmar:.2f}",                f"基准 {bm.calmar:.2f}",                "#f39c12"),
+    )
+
+    # ── 第二组：回撤对比（同行） ──
+    g2 = group(
+        "回撤", 2,
+        card("最大回撤",    f"{pm.max_drawdown*100:.2f}%",         f"基准 {bm.max_drawdown*100:.2f}%",  "#c0392b"),
+        card("超额最大回撤", f"{pm.excess_max_drawdown*100:.2f}%", "超额净值最大下行",                   "#c0392b"),
+    )
+
+    # ── 第三组：超额指标 ──
+    g3 = group(
+        "超额指标", 6,
+        card("年化超额",   f"{pm.annual_excess_return*100:+.2f}%", "组合 vs 基准",      "#3498db"),
+        card("跟踪误差TE", f"{pm.tracking_error*100:.2f}%",        "年化超额波动",       "#3498db"),
+        card("信息比率IR", f"{pm.info_ratio:.2f}",                 "超额/TE",           "#3498db"),
+        card("超额Calmar", f"{pm.excess_calmar:.2f}",              "超额/超额MDD",       "#3498db"),
+        card("月度胜率",   f"{pm.win_rate_monthly*100:.1f}%",      "超额>0的月份占比",   "#27ae60"),
+        card("月均超额",   f"{pm.avg_monthly_excess*100:+.2f}%",   "月度算术平均",       "#27ae60"),
+    )
+
+    return g1 + g2 + g3
 
 
 def _build_yearly_table(result: BacktestResult) -> str:
@@ -309,9 +326,9 @@ def _build_yearly_table(result: BacktestResult) -> str:
             <td class="{color(r['超额收益'])}">{fmt_pct(r['超额收益'], True)}</td>
             <td>{fmt_pct(r['波动率'])}</td>
             <td class="negative">{fmt_pct(r['最大回撤'])}</td>
-            <td>{r['Sharpe']:.3f}</td>
-            <td>{r['Calmar']:.3f}</td>
-            <td>{r['信息比率']:.3f}</td>
+            <td>{r['Sharpe']:.2f}</td>
+            <td>{r['Calmar']:.2f}</td>
+            <td>{r['信息比率']:.2f}</td>
             <td>{fmt_pct(r['超额TE'])}</td>
             <td class="negative">{fmt_pct(r['超额回撤'])}</td>
         </tr>
@@ -458,8 +475,14 @@ _CSS = """
     border-left: 3px solid #3498db; padding-left: 10px;
   }
   .metric-grid {
-    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    display: grid; gap: 12px; margin-bottom: 16px;
   }
+  .metric-group-label {
+    font-size: 11px; font-weight: 600; color: #95a5a6;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    margin: 16px 0 8px 2px;
+  }
+  .metric-group-label:first-child { margin-top: 0; }
   .metric-card {
     background: #fafbfc; border-radius: 6px; padding: 14px;
     border-left: 3px solid #95a5a6;

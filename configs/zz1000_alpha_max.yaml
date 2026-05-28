@@ -1,0 +1,39 @@
+strategy: alpha_max
+index: zz1000
+
+backtest:
+  start_date: "2024-06-01"
+  end_date: "2026-05-22"
+  rebalance_freq: 5
+  initial_value: 100000000
+
+universe:
+  exclude_bj: true
+  exclude_st: true
+  top_n: null
+
+optimizer:
+  weight_upper: 0.02
+  industry_upper: 0.20
+  min_constituent_ratio: 0.40
+  diversification_penalty: 0.05
+  style_bound: 1.0
+  max_turnover: 0.30
+
+alpha:
+  ic_mean: 0.08
+  ic_std: 0.10
+  decay: 0.80
+  seed: 42
+  fwd_days: 5
+
+execution:
+  cost_buy: 0.001
+  cost_sell: 0.002
+  risk_free: 0.02
+
+output:
+  weights: "output/zz1000_alpha_max_weights.parquet"
+  nav: "output/zz1000_alpha_max_nav_realistic.parquet"
+  report: "output/zz1000_alpha_max_report_realistic.html"
+  report_title: "中证1000 量化多头组合回测报告（真实执行）"

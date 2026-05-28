@@ -126,7 +126,7 @@ class JYBarraFactors:
         style_df = day_df.reindex(tickers).fillna(0.0)
 
         # ---- 行业虚拟变量 ----
-        ind_df = self._build_industry_dummies(tickers, snapshot, panel)
+        ind_df = self._build_industry_dummies(tickers, snapshot, panel, self.target_date)
 
         return pd.concat([style_df, ind_df], axis=1)
 
@@ -135,17 +135,18 @@ class JYBarraFactors:
         tickers: list[str],
         snapshot: MarketSnapshot,
         panel: pl.DataFrame | None,
+        target_date: date | None = None,
     ) -> pd.DataFrame:
         """优先用 snapshot.industry，缺失时从 panel 补充。"""
         ind = snapshot.industry.reindex(tickers)
 
         # 若 snapshot.industry 覆盖不全，从 panel 补
-        if panel is not None and ind.isna().any():
+        if panel is not None and ind.isna().any() and target_date is not None:
             missing = ind[ind.isna()].index.tolist()
             today = (
                 panel
                 .filter(pl.col("code").is_in(missing))
-                .filter(pl.col("date") == snapshot.industry.name or True)
+                .filter(pl.col("date") == target_date)
                 .select(["code", "industry_l1"])
                 .unique(subset=["code"])
                 .to_pandas()

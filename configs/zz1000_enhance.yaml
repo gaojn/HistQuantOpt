@@ -1,0 +1,41 @@
+strategy: index_enhance
+index: zz1000
+
+backtest:
+  start_date: "2023-06-01"
+  end_date: "2026-05-22"
+  rebalance_freq: 5
+  initial_value: 100000000
+
+universe:
+  exclude_bj: true
+  exclude_st: true
+  top_n: null
+
+optimizer:
+  weight_upper: 0.01
+  weight_lower: 0.0
+  min_constituent_ratio: 0.80
+  industry_active_bound: 0.07
+  style_active_bound: 0.50
+  tracking_penalty: 10.0
+  max_turnover: 0.40
+  weight_diff_l2_bound: null
+
+alpha:
+  ic_mean: 0.08
+  ic_std: 0.10
+  decay: 0.80
+  seed: 42
+  fwd_days: 5
+
+execution:
+  cost_buy: 0.001
+  cost_sell: 0.002
+  risk_free: 0.02
+
+output:
+  weights: "output/zz1000_enhance_weights.parquet"
+  nav: "output/zz1000_enhance_nav_realistic.parquet"
+  report: "output/zz1000_enhance_report_realistic.html"
+  report_title: "中证1000 指数增强组合回测报告（真实执行）"

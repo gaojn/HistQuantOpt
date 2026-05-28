@@ -41,7 +41,8 @@ from portfolio_optimizer.optimizer.index_enhance import (
 )
 
 FACTOR_PATH    = Path("data/jy_stylefactor_000985_CSI_20230209_20260522.parquet")
-INDEX          = "zz500"               # 基准指数：hs300 / zz500 / zz1000
+INDEX          = "zz1000"              # 基准指数：hs300 / zz500 / zz1000
+UNIVERSE_SIZE  = None                  # None=全市场；整数=按市值取前N只
 BACKTEST_START = date(2023, 6, 1)
 BACKTEST_END   = date(2026, 5, 22)
 REBAL_FREQ     = 5
@@ -121,7 +122,7 @@ def get_alpha_for_date(
 # ────────────────────────────────────────────────────────────────
 
 def filter_universe(snapshot, panel: pl.DataFrame, target_date: date):
-    """候选池：全市场 - 北交所(.BJ) - ST 股票。"""
+    """候选池：全市场 - 北交所(.BJ) - ST 股票，可选按市值截取 TOP_N。"""
     today = (
         panel.filter(pl.col("date") == target_date)
         .select(["code", "is_st"])
@@ -132,6 +133,11 @@ def filter_universe(snapshot, panel: pl.DataFrame, target_date: date):
     keep_mask = (~is_bj) & (~is_st)
     keep_set = set(today.index[keep_mask].tolist())
     keep = [t for t in snapshot.tickers if t in keep_set]
+
+    # 按市值截取 TOP_N
+    if UNIVERSE_SIZE is not None and len(keep) > UNIVERSE_SIZE:
+        cap = snapshot.market_cap.reindex(keep).fillna(0.0)
+        keep = cap.nlargest(UNIVERSE_SIZE).index.tolist()
 
     return replace(
         snapshot,

@@ -95,6 +95,10 @@ class IndexEnhanceOptimizer:
         )
         alpha[banned_mask] = 0.0
 
+        # 涨停：不可加仓（w_i ≤ w_prev_i）；跌停：不可减仓（w_i ≥ w_prev_i）
+        lup_mask = snapshot.limit_up_mask   # bool array, shape (n,)
+        ldn_mask = snapshot.limit_down_mask
+
         w = cp.Variable(n, name="w", nonneg=True)
         constraints = []
 
@@ -107,6 +111,14 @@ class IndexEnhanceOptimizer:
         # 3. 禁止持仓
         for i in np.where(banned_mask)[0]:
             constraints.append(w[i] == 0.0)
+
+        # 3b. 涨跌停约束（依赖上期权重）
+        if prev_weight is not None:
+            w_prev = np.array(prev_weight, dtype=float)
+            for i in np.where(lup_mask)[0]:
+                constraints.append(w[i] <= float(w_prev[i]))   # 涨停：不可加仓
+            for i in np.where(ldn_mask)[0]:
+                constraints.append(w[i] >= float(w_prev[i]))   # 跌停：不可减仓
 
         # 4. 成分股权重下限
         if snapshot.is_constituent is not None and cfg.min_constituent_ratio > 0:

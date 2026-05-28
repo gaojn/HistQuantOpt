@@ -25,6 +25,8 @@ import pandas as pd
 import polars as pl
 from scipy.stats import spearmanr
 
+from dataclasses import replace
+
 from portfolio_optimizer.io.data_panel import load_panel
 from portfolio_optimizer.data.real_adapter import RealMarketAdapter
 from portfolio_optimizer.factors.jy_barra import JYBarraFactors
@@ -34,7 +36,8 @@ FACTOR_PATH    = Path("data/jy_stylefactor_000985_CSI_20230209_20260522.parquet"
 BACKTEST_START = date(2024, 6, 1)
 BACKTEST_END   = date(2026, 5, 22)
 REBAL_FREQ     = 5
-INDEX          = "hs300"
+INDEX          = "zz1000"
+UNIVERSE_SIZE  = None                  # None=全市场；整数=按市值取前N只
 PORTFOLIO_VAL  = 1e8
 
 
@@ -190,6 +193,29 @@ def main() -> None:
             print(f"  [{rebal_date}] 跳过（快照失败：{e}）")
             continue
 
+        # 候选池过滤：剔除北交所 + ST，按市值截取 TOP_N
+        tickers_all = snapshot.tickers
+        bj_mask = [t.endswith(".BJ") for t in tickers_all]
+        day_panel = full_panel.filter(pl.col("date") == rebal_date).select(["code","is_st"]).to_pandas().set_index("code")
+        st_set = set(day_panel[day_panel["is_st"] == 1].index)
+        keep = [t for t, bj in zip(tickers_all, bj_mask) if not bj and t not in st_set]
+        if UNIVERSE_SIZE is not None and len(keep) > UNIVERSE_SIZE:
+            cap = snapshot.market_cap.reindex(keep).fillna(0.0)
+            keep = cap.nlargest(UNIVERSE_SIZE).index.tolist()
+        snapshot = replace(
+            snapshot,
+            tickers=keep,
+            industry=snapshot.industry.reindex(keep),
+            adv=snapshot.adv.reindex(keep),
+            status=snapshot.status.reindex(keep),
+            prev_weight=snapshot.prev_weight.reindex(keep).fillna(0.0),
+            market_cap=snapshot.market_cap.reindex(keep),
+            is_constituent=(
+                snapshot.is_constituent.reindex(keep)
+                if snapshot.is_constituent is not None else None
+            ),
+        )
+
         # Barra 因子
         barra = JYBarraFactors(
             snapshot=snapshot,
@@ -277,7 +303,7 @@ def main() -> None:
     # 保存
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / "batch_weights_alpha_max.parquet"
+    out = out_dir / f"{INDEX}_alpha_max_weights.parquet"
     weight_df.to_parquet(out)
     print(f"\n  权重矩阵已保存：{out}")
     print(f"\n{'='*58}\n")

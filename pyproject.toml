@@ -28,7 +28,8 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["portfolio_optimizer*"]
 
 [tool.ruff]
 line-length = 100
