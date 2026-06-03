@@ -91,18 +91,29 @@ class Backtester:
 
     Parameters
     ----------
-    cost_one_way : float
-        单边交易成本（佣金+冲击），默认 0.15%
+    cost_buy : float
+        买入单边成本（佣金+冲击），默认 0.15%
+    cost_sell : float
+        卖出单边成本（佣金+冲击+印花税），默认 0.20%。
+        A 股卖出方含印花税（0.05%），整体略高于买入。
     risk_free : float
         无风险年化利率，用于 Sharpe 计算，默认 0.02
     """
 
     def __init__(
         self,
-        cost_one_way: float = 0.0015,
+        cost_buy: float = 0.0015,
+        cost_sell: float = 0.0020,
         risk_free: float = 0.02,
+        # 向后兼容：若只传 cost_one_way，买卖使用同一费率
+        cost_one_way: float | None = None,
     ) -> None:
-        self.cost_one_way = cost_one_way
+        if cost_one_way is not None:
+            self.cost_buy = cost_one_way
+            self.cost_sell = cost_one_way
+        else:
+            self.cost_buy = cost_buy
+            self.cost_sell = cost_sell
         self.risk_free = risk_free
 
     def run(
@@ -158,8 +169,11 @@ class Backtester:
                 w_target  = weight_df.loc[dt].reindex(tickers).fillna(0.0).values
                 # 漂移后权重归一化
                 w_drifted = w_current / (w_current.sum() + 1e-12)
-                bilateral_turnover = float(np.abs(w_target - w_drifted).sum())
-                cost = bilateral_turnover * self.cost_one_way
+                delta = w_target - w_drifted
+                buy_amount  = float(np.maximum(delta, 0.0).sum())
+                sell_amount = float(np.maximum(-delta, 0.0).sum())
+                bilateral_turnover = buy_amount + sell_amount
+                cost = buy_amount * self.cost_buy + sell_amount * self.cost_sell
                 # 当日收益先用漂移权重，再扣成本，然后切换到目标权重
                 day_ret = float(w_drifted @ r) - cost
                 port_ret[dt] = day_ret
