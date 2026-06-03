@@ -63,8 +63,41 @@ class AlphaFactors:
 
     @property
     def values(self) -> np.ndarray:
-        """处理后的 Alpha 向量，shape=(N,)。"""
+        """处理后的 Alpha 向量（z-score），shape=(N,)。"""
         return self._alpha
+
+    def to_return_alpha(
+        self,
+        ic: float,
+        stock_vol: np.ndarray | float,
+    ) -> np.ndarray:
+        """
+        将 z-score alpha 转化为预期超额收益率（Grinold-Kahn 公式）。
+
+        α_return_i = IC × σ_i × z_i
+
+        参数确定参考：
+            IC   - 因子预期信息系数，典型值 0.03~0.08（可用历史 IC 均值）
+            σ_i  - 个股年化波动率，典型 0.25~0.40
+
+        转化后优化器中 γ（L2惩罚）约为 0.3~2.0，
+        λ（换手惩罚）约等于单次往返成本 × 年换仓次数（如 0.003~0.015）。
+
+        Parameters
+        ----------
+        ic : float
+            预期信息系数（Information Coefficient）
+        stock_vol : array-like or float
+            个股年化波动率，shape (N,) 或标量（所有股票相同）
+
+        Returns
+        -------
+        np.ndarray, shape (N,)
+            预期超额年化收益率（小数，如 0.05 表示 5%）
+        """
+        vol = np.broadcast_to(np.asarray(stock_vol, dtype=float), self._alpha.shape)
+        return ic * vol * self._alpha
+
 
     @property
     def series(self) -> pd.Series:

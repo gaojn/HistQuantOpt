@@ -21,6 +21,11 @@ optimizer:
   tracking_penalty: 10.0
   max_turnover: 0.40
   weight_diff_l2_bound: null
+  # 换手软惩罚：λ × Σ c_i |Δw_i|，0 表示关闭
+  # 调参参考（alpha 为 z-score 时）：0.01~0.05
+  turnover_penalty: 0.0
+  # 是否按个股流动性加权（σ/√ADV），关闭则等权惩罚
+  liquidity_weighted_cost: true
 
 alpha:
   ic_mean: 0.08

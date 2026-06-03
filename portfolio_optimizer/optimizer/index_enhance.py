@@ -2,11 +2,11 @@
 指数增强组合优化器（QP）。
 
 目标函数：
-    max  w'α  -  γ · ‖w − w_bm‖²
+    max  w'α  -  γ · ‖w − w_bm‖²  -  λ · Σ c_i |w_i - w_prev_i|
 
-    w'α              : 组合预期收益
-    γ·‖w−w_bm‖²      : 跟踪误差代理（L2 偏离基准的惩罚）
-                       γ 越大 → 越贴近基准（被动），γ 越小 → 越主动
+    w'α                      : 组合预期收益
+    γ·‖w−w_bm‖²              : 跟踪误差代理（L2 偏离基准的惩罚）
+    λ·Σ c_i|w_i - w_prev_i| : 加权换手惩罚（软约束），c_i 为个股成本权重
 
 约束体系（相对基准）：
     sum(w)                  = 1
@@ -14,7 +14,7 @@
     sum(w[const])           ≥ R_min                      成分股下限（如 HS300 ≥ 80%）
     |Σ_{i∈ind_k}(w_i-w_bm_i)| ≤ I_active                行业主动偏离 (±5%)
     |B_style[:,k]'(w-w_bm)| ≤ S_active                  风格主动暴露 (±0.3σ)
-    ‖w − w_prev‖₁           ≤ T_max                     双边换手率
+    ‖w − w_prev‖₁           ≤ T_max                     双边换手率硬上限（可选）
     w[停牌/ST/次新]          = 0                         交易状态
 
 求解器：CLARABEL
@@ -51,7 +51,15 @@ class IndexEnhanceConfig:
     tracking_penalty : float
         跟踪误差惩罚系数 γ（越大越像基准）
     max_turnover : float | None
-        双边换手率上限（默认 20%）
+        双边换手率硬上限（默认 20%）
+    turnover_penalty : float
+        换手惩罚系数 λ（软约束），默认 0.0（不惩罚）。
+        与 max_turnover 可同时使用：先用软惩罚自然压制换手，
+        再用硬上限兜底。
+        调参参考：
+            0.005 ~ 0.02  轻度惩罚，换手下降 20-40%
+            0.02  ~ 0.10  中度惩罚，换手下降 40-70%
+            > 0.10        强惩罚，组合趋向保持不变
     """
     weight_upper: float = 0.05
     weight_lower: float = 0.0
@@ -60,6 +68,7 @@ class IndexEnhanceConfig:
     style_active_bound: float = 0.30
     tracking_penalty: float = 10.0
     max_turnover: float | None = 0.20
+    turnover_penalty: float = 0.0
     weight_diff_l2_bound: float | None = None   # ‖w-w_bm‖₂ 硬约束上限
 
 
@@ -76,6 +85,7 @@ class IndexEnhanceOptimizer:
         benchmark_weight: np.ndarray,
         style_loading: pd.DataFrame | None = None,
         prev_weight: np.ndarray | None = None,
+        cost_vector: np.ndarray | None = None,
     ) -> "IndexEnhanceResult":
         cfg = self.config
         tickers = snapshot.tickers
@@ -146,18 +156,34 @@ class IndexEnhanceOptimizer:
             constraints.append(active_exp <= cfg.style_active_bound)
             constraints.append(active_exp >= -cfg.style_active_bound)
 
-        # 7. 换手
-        if prev_weight is not None and cfg.max_turnover is not None:
+        # 7. 换手约束与惩罚
+        turnover_penalty_term = 0.0
+        if prev_weight is not None:
             w_prev = np.array(prev_weight, dtype=float)
-            constraints.append(cp.sum(cp.abs(w - w_prev)) <= cfg.max_turnover)
+            delta_w = cp.abs(w - w_prev)
+
+            # 7a. 软约束：加权换手惩罚进目标函数
+            if cfg.turnover_penalty > 0:
+                if cost_vector is not None:
+                    c = np.array(cost_vector, dtype=float)
+                    c = np.clip(c, 0.0, None)
+                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(cp.multiply(c, delta_w))
+                else:
+                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(delta_w)
+
+            # 7b. 硬上限（可与软惩罚同时存在）
+            if cfg.max_turnover is not None:
+                constraints.append(cp.sum(delta_w) <= cfg.max_turnover)
 
         # 8. L2 偏离基准硬约束（TE 代理）
         if cfg.weight_diff_l2_bound is not None:
             constraints.append(cp.norm(w - w_bm, 2) <= cfg.weight_diff_l2_bound)
 
-        # 目标函数
+        # 目标函数：max w'α - γ·‖w-w_bm‖² - λ·Σ c_i|Δw_i|
         objective = cp.Maximize(
-            alpha @ w - cfg.tracking_penalty * cp.sum_squares(w - w_bm)
+            alpha @ w
+            - cfg.tracking_penalty * cp.sum_squares(w - w_bm)
+            - turnover_penalty_term
         )
 
         prob = cp.Problem(objective, constraints)

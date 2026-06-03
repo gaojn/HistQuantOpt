@@ -2,11 +2,11 @@
 量化多头 Alpha 最大化优化器（轻量 QP）。
 
 目标函数：
-    max  w'α  -  γ · ‖w‖²
+    max  w'α  -  γ · ‖w‖²  -  λ · Σ c_i |w_i - w_prev_i|
 
-    w'α       : 组合 alpha 收益
-    γ·‖w‖²   : L2 分散惩罚（无需 Sigma，等价于隐式对角风险）
-               γ 越大 → 持仓越分散，单票集中度越低
+    w'α                      : 组合 alpha 收益
+    γ·‖w‖²                  : L2 分散惩罚（无需 Sigma，等价于隐式对角风险）
+    λ·Σ c_i|w_i - w_prev_i| : 加权换手惩罚（软约束），c_i 为个股成本权重
 
 约束条件：
     sum(w)              = 1                      预算约束
@@ -15,7 +15,7 @@
     sum(w[ind==k])      <= industry_upper        行业绝对权重上限
     sum(w[const])       >= min_constituent_ratio 成分股权重下限（可选）
     |B_style[:,k]' w|   <= style_bound           风格因子绝对暴露约束
-    ‖w - w_prev‖₁       <= max_turnover          双边换手率约束
+    ‖w - w_prev‖₁       <= max_turnover          双边换手率硬上限（可选）
     w[停牌/ST/次新]      = 0                      禁止持仓
 
 求解器：CLARABEL
@@ -55,8 +55,16 @@ class AlphaMaxConfig:
         风格因子绝对暴露上限，None 表示不约束，默认 1.0
         即 |B_style[:,k]' w| <= style_bound  对所有风格因子 k
     max_turnover : float | None
-        双边换手率上限（0~2），None 表示不约束，默认 None
+        双边换手率硬上限（0~2），None 表示不约束，默认 None
         例：0.5 表示单期最多换 50% 仓位
+    turnover_penalty : float
+        换手惩罚系数 λ（软约束），默认 0.0（不惩罚）。
+        与 max_turnover 可同时使用：先用软惩罚自然压制换手，
+        再用硬上限兜底。
+        调参参考：
+            0.005 ~ 0.02  轻度惩罚，换手下降 20-40%
+            0.02  ~ 0.10  中度惩罚，换手下降 40-70%
+            > 0.10        强惩罚，组合趋向保持不变
     """
     weight_upper: float = 0.02
     industry_upper: float = 0.20
@@ -64,6 +72,7 @@ class AlphaMaxConfig:
     diversification_penalty: float = 0.05
     style_bound: float | None = 1.0
     max_turnover: float | None = None
+    turnover_penalty: float = 0.0
 
 
 class AlphaMaxOptimizer:
@@ -84,6 +93,7 @@ class AlphaMaxOptimizer:
         snapshot: MarketSnapshot,
         style_loading: pd.DataFrame | None = None,
         prev_weight: np.ndarray | None = None,
+        cost_vector: np.ndarray | None = None,
     ) -> "AlphaMaxResult":
         """
         执行优化。
@@ -98,8 +108,13 @@ class AlphaMaxOptimizer:
             风格因子载荷矩阵，shape (N, K)，index=tickers。
             传入时启用风格约束，None 则跳过。
         prev_weight : np.ndarray | None
-            上期权重，shape (N,)，用于换手率约束。
-            None 时跳过换手约束。
+            上期权重，shape (N,)，用于换手约束/惩罚。
+            None 时跳过所有换手相关处理。
+        cost_vector : np.ndarray | None, shape (N,)
+            个股成本权重，用于加权换手惩罚 Σ c_i|Δw_i|。
+            None 时等权（所有股票成本相同）。
+            典型用法：传入相对冲击成本，如 1/sqrt(ADV_ratio)，
+            使流动性差的股票换手惩罚更强。
 
         Returns
         -------
@@ -171,16 +186,30 @@ class AlphaMaxOptimizer:
             constraints.append(exposure <= cfg.style_bound)
             constraints.append(exposure >= -cfg.style_bound)
 
-        # ---- 7. 换手率约束 ----
-        if prev_weight is not None and cfg.max_turnover is not None:
+        # ---- 7. 换手约束与惩罚 ----
+        turnover_penalty_term = 0.0
+        if prev_weight is not None:
             w_prev = np.array(prev_weight, dtype=float)
-            # 双边换手：sum |w_i - w_prev_i| <= max_turnover
-            turnover = cp.sum(cp.abs(w - w_prev))
-            constraints.append(turnover <= cfg.max_turnover)
+            delta_w = cp.abs(w - w_prev)
 
-        # ---- 目标：max w'α - γ·‖w‖² ----
+            # 7a. 软约束：加权换手惩罚进目标函数
+            if cfg.turnover_penalty > 0:
+                if cost_vector is not None:
+                    c = np.array(cost_vector, dtype=float)
+                    c = np.clip(c, 0.0, None)
+                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(cp.multiply(c, delta_w))
+                else:
+                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(delta_w)
+
+            # 7b. 硬上限（可与软惩罚同时存在）
+            if cfg.max_turnover is not None:
+                constraints.append(cp.sum(delta_w) <= cfg.max_turnover)
+
+        # ---- 目标：max w'α - γ·‖w‖² - λ·Σ c_i|Δw_i| ----
         objective = cp.Maximize(
-            alpha @ w - cfg.diversification_penalty * cp.sum_squares(w)
+            alpha @ w
+            - cfg.diversification_penalty * cp.sum_squares(w)
+            - turnover_penalty_term
         )
 
         prob = cp.Problem(objective, constraints)

@@ -24,7 +24,7 @@ from portfolio_optimizer.io.data_panel import load_panel
 from portfolio_optimizer.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from portfolio_optimizer.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
 from portfolio_optimizer.pipeline.universe import (
-    build_synthetic_alpha, filter_universe, get_alpha_for_date,
+    build_cost_vector, build_synthetic_alpha, filter_universe, get_alpha_for_date,
 )
 
 FACTOR_PATH = Path("data/jy_stylefactor_000985_CSI_20230209_20260522.parquet")
@@ -124,6 +124,7 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
             style_active_bound=float(opt_cfg["style_active_bound"]),
             tracking_penalty=float(opt_cfg["tracking_penalty"]),
             max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
+            turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
             weight_diff_l2_bound=float(opt_cfg["weight_diff_l2_bound"]) if opt_cfg.get("weight_diff_l2_bound") else None,
         )
         optimizer = IndexEnhanceOptimizer(base_config)
@@ -136,8 +137,14 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
             diversification_penalty=float(opt_cfg.get("diversification_penalty", 0.05)),
             style_bound=float(opt_cfg["style_bound"]) if opt_cfg.get("style_bound") else None,
             max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
+            turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
         )
         optimizer = AlphaMaxOptimizer(base_config)
+
+    use_cost_vector = (
+        float(opt_cfg.get("turnover_penalty", 0.0)) > 0
+        and bool(opt_cfg.get("liquidity_weighted_cost", True))
+    )
 
     # ── 逐期优化 ─────────────────────────────────────────────
     print(f"\n[4] 逐期优化...")
@@ -181,6 +188,15 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
         else:
             ps = None
 
+        # 个股冲击成本权重（仅在启用换手软惩罚时计算）
+        cost_vec = None
+        if use_cost_vector and ps is not None:
+            cost_vec = build_cost_vector(
+                tickers=snapshot.tickers,
+                panel=panel,
+                target_date=rebal_date,
+            )
+
         # 优化
         if strategy == "index_enhance":
             bm_series = bm.get_weights(rebal_date, tickers=snapshot.tickers)
@@ -195,12 +211,14 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
                 benchmark_weight=bm_weight,
                 style_loading=barra.style_loading,
                 prev_weight=ps,
+                cost_vector=cost_vec,
             )
         else:
             result = optimizer.optimize(
                 alpha, snapshot,
                 style_loading=barra.style_loading,
                 prev_weight=ps,
+                cost_vector=cost_vec,
             )
 
         elapsed = time.time() - t0
