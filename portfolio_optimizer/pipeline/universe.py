@@ -14,6 +14,81 @@ import polars as pl
 from portfolio_optimizer.data.generator import MarketSnapshot
 
 
+def build_cost_vector(
+    tickers: list[str],
+    panel: pl.DataFrame,
+    target_date: date,
+    lookback: int = 20,
+) -> np.ndarray:
+    """
+    计算个股冲击成本代理向量，归一化使中位数 = 1。
+
+    公式：c_i = σ_i / sqrt(ADV_i)
+
+    来源：Almgren-Chriss 冲击模型，单笔冲击成本 ≈ σ × sqrt(Q/ADV)。
+    在下单量占组合比例固定时，c_i ∝ σ_i / sqrt(ADV_i)：
+    波动大或流动性差的股票冲击成本更高。
+
+    Parameters
+    ----------
+    tickers     : 目标股票列表
+    panel       : 行情面板（需含 adj_close、amount、date、code）
+    target_date : 调仓日（取该日及之前 lookback 个交易日）
+    lookback    : 滚动窗口（交易日数），默认 20
+
+    Returns
+    -------
+    np.ndarray, shape (N,)
+        归一化成本权重，中位数=1，缺失/异常值填 1.0（等权）
+    """
+    ts = pd.Timestamp(target_date)
+
+    # 取目标日之前（含）lookback 个交易日
+    avail_dates = sorted(
+        panel.filter(pl.col("date") <= target_date)
+        .select("date").unique()["date"].to_list()
+    )
+    window_dates = avail_dates[-lookback:]
+    if len(window_dates) < 5:
+        return np.ones(len(tickers))
+
+    sub = (
+        panel.filter(
+            (pl.col("date").is_in(window_dates)) &
+            (pl.col("code").is_in(tickers))
+        )
+        .select(["date", "code", "adj_close", "amount"])
+        .to_pandas()
+        .pivot(index="date", columns="code", values=["adj_close", "amount"])
+        .sort_index()
+    )
+
+    adj   = sub["adj_close"].reindex(columns=tickers)
+    amt   = sub["amount"].reindex(columns=tickers)
+
+    # 年化波动率（20日滚动标准差 × √252）
+    daily_ret = adj.pct_change(fill_method=None)
+    vol = daily_ret.std(ddof=1) * np.sqrt(252)          # pd.Series, index=ticker
+
+    # ADV：窗口内日均成交额（千元）
+    adv = amt.mean()                                     # pd.Series, index=ticker
+
+    # c_i = σ_i / sqrt(ADV_i)，对零/NaN 做保护
+    adv_safe = adv.clip(lower=1.0)
+    c_raw = vol / np.sqrt(adv_safe)
+
+    # 归一化：除以中位数，使中位数股票成本权重 = 1
+    median = c_raw.median()
+    if median > 1e-12:
+        c_raw = c_raw / median
+
+    # 缺失/异常 → 填 1.0（等权，不额外惩罚）
+    c_raw = c_raw.replace([np.inf, -np.inf], np.nan).fillna(1.0)
+    c_raw = c_raw.clip(lower=0.1, upper=10.0)          # 防极端值
+
+    return c_raw.reindex(tickers).fillna(1.0).values.astype(float)
+
+
 def filter_universe(
     snapshot: MarketSnapshot,
     panel: pl.DataFrame,
