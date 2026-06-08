@@ -1,6 +1,7 @@
 # 大文件 / 数据缓存（不入版本控制）
-data/
-output/
+# 注意：必须根锚定（/ 前缀），否则 data/ 会误伤源码目录 portfolio_optimizer/data/
+/data/
+/output/
 
 # Python
 __pycache__/
