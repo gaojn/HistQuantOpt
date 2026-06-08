@@ -1,0 +1,46 @@
+strategy: index_enhance
+index: zz500
+
+# 方向1 验证：CNE6 因子风险模型进目标函数。
+# 回测期对齐 CNE6 风险面板覆盖（2025-01~2026-05），先用短期数据做通。
+backtest:
+  start_date: "2025-01-02"
+  end_date: "2026-05-20"
+  rebalance_freq: 5
+  initial_value: 100000000
+
+universe:
+  exclude_bj: true
+  exclude_st: true
+  top_n: null
+
+optimizer:
+  weight_upper: 0.02
+  weight_lower: 0.0
+  min_constituent_ratio: 0.80
+  industry_active_bound: 0.07
+  style_active_bound: 0.50
+  max_turnover: 0.40
+  weight_diff_l2_bound: null
+  # ── 方向1 开关 ──
+  use_cne6_risk: true        # 启用 CNE6 因子风险模型
+  risk_aversion: 10.0        # λ：风险厌恶系数（替代 tracking_penalty）
+  tracking_penalty: 10.0     # 仅 use_cne6_risk=false 时生效，留作回退
+
+alpha:
+  ic_mean: 0.08
+  ic_std: 0.10
+  decay: 0.80
+  seed: 42
+  fwd_days: 5
+
+execution:
+  cost_buy: 0.001
+  cost_sell: 0.002
+  risk_free: 0.02
+
+output:
+  weights: "output/zz500_enhance_cne6_weights.parquet"
+  nav: "output/zz500_enhance_cne6_nav_realistic.parquet"
+  report: "output/zz500_enhance_cne6_report_realistic.html"
+  report_title: "中证500 指数增强（CNE6 因子风险模型）回测报告"
