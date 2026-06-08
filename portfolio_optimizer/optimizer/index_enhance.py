@@ -23,12 +23,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cvxpy as cp
 import numpy as np
 import pandas as pd
 
 from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
+
+if TYPE_CHECKING:
+    from portfolio_optimizer.risk.cne6_risk import RiskSnapshot
 
 
 @dataclass
@@ -49,7 +53,8 @@ class IndexEnhanceConfig:
     style_active_bound : float
         风格因子主动暴露上限（±0.3σ）
     tracking_penalty : float
-        跟踪误差惩罚系数 γ（越大越像基准）
+        跟踪误差惩罚系数 γ（越大越像基准）。仅在未启用因子风险模型
+        （risk_aversion=None）时生效。
     max_turnover : float | None
         双边换手率硬上限（默认 20%）
     turnover_penalty : float
@@ -60,6 +65,13 @@ class IndexEnhanceConfig:
             0.005 ~ 0.02  轻度惩罚，换手下降 20-40%
             0.02  ~ 0.10  中度惩罚，换手下降 40-70%
             > 0.10        强惩罚，组合趋向保持不变
+    risk_aversion : float | None
+        因子风险厌恶系数 λ，默认 None。
+        - None：退回 L2 偏离惩罚 γ·‖w−w_bm‖²（向后兼容旧行为）
+        - 提供且 optimize() 传入 risk_snapshot 时：用真跟踪误差
+          λ·(active'XFX'active + δ'active²)，active=w−w_bm，
+          刻画相对基准的真实主动风险（因子相关性 + 特质风险）
+        与 turnover_penalty 正交：风险项控主动风险，成本项控换手。
     """
     weight_upper: float = 0.05
     weight_lower: float = 0.0
@@ -70,6 +82,7 @@ class IndexEnhanceConfig:
     max_turnover: float | None = 0.20
     turnover_penalty: float = 0.0
     weight_diff_l2_bound: float | None = None   # ‖w-w_bm‖₂ 硬约束上限
+    risk_aversion: float | None = None
 
 
 class IndexEnhanceOptimizer:
@@ -86,6 +99,7 @@ class IndexEnhanceOptimizer:
         style_loading: pd.DataFrame | None = None,
         prev_weight: np.ndarray | None = None,
         cost_vector: np.ndarray | None = None,
+        risk_snapshot: "RiskSnapshot | None" = None,
     ) -> "IndexEnhanceResult":
         cfg = self.config
         tickers = snapshot.tickers
@@ -179,12 +193,22 @@ class IndexEnhanceOptimizer:
         if cfg.weight_diff_l2_bound is not None:
             constraints.append(cp.norm(w - w_bm, 2) <= cfg.weight_diff_l2_bound)
 
-        # 目标函数：max w'α - γ·‖w-w_bm‖² - λ·Σ c_i|Δw_i|
-        objective = cp.Maximize(
-            alpha @ w
-            - cfg.tracking_penalty * cp.sum_squares(w - w_bm)
-            - turnover_penalty_term
-        )
+        # 目标函数：max w'α - 主动风险惩罚 - λ·Σ c_i|Δw_i|
+        # 风险项：优先 CNE6 因子风险模型 λ·(active'XFX'active + δ'active²)，
+        #         未提供时退回 L2 偏离惩罚 γ·‖w-w_bm‖²（向后兼容）
+        # 成本项：加权换手惩罚 turnover_penalty_term（软约束，见上方 step 7）
+        if cfg.risk_aversion is not None and risk_snapshot is not None:
+            active = w - w_bm
+            X = risk_snapshot.X                       # (N, K)
+            F = risk_snapshot.F                       # (K, K)
+            delta = risk_snapshot.delta               # (N,)
+            factor_te = cp.quad_form(X.T @ active, cp.psd_wrap(F))
+            specific_te = cp.sum(cp.multiply(delta, cp.square(active)))
+            risk_penalty = cfg.risk_aversion * (factor_te + specific_te)
+        else:
+            risk_penalty = cfg.tracking_penalty * cp.sum_squares(w - w_bm)
+
+        objective = cp.Maximize(alpha @ w - risk_penalty - turnover_penalty_term)
 
         prob = cp.Problem(objective, constraints)
         # 优先 CLARABEL（max_iter 提至 500，应对大规模候选池）；

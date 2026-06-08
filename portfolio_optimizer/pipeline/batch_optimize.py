@@ -26,6 +26,7 @@ from portfolio_optimizer.optimizer.index_enhance import IndexEnhanceConfig, Inde
 from portfolio_optimizer.pipeline.universe import (
     build_cost_vector, build_synthetic_alpha, filter_universe, get_alpha_for_date,
 )
+from portfolio_optimizer.risk import CNE6RiskModel
 
 FACTOR_PATH = Path("data/jy_stylefactor_000985_CSI_20230209_20260522.parquet")
 
@@ -111,6 +112,17 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
     # ── 优化器 ───────────────────────────────────────────────
     adapter = RealMarketAdapter()
 
+    # CNE6 因子风险模型（方向1）：opt.use_cne6_risk 开启时，目标函数用真因子
+    # 风险 λ·w'Σw 替代 L2 惩罚；risk_aversion 为风险厌恶系数 λ。默认关闭，
+    # 现有 config 行为不变。
+    use_cne6_risk = bool(opt_cfg.get("use_cne6_risk", False))
+    risk_aversion = float(opt_cfg["risk_aversion"]) if opt_cfg.get("risk_aversion") else None
+    cne6_rm = None
+    if use_cne6_risk:
+        cne6_rm = CNE6RiskModel()
+        cov0, cov1 = cne6_rm.coverage
+        print(f"\n[3a] 启用 CNE6 因子风险模型  覆盖={cov0}~{cov1}  λ={risk_aversion}")
+
     if strategy == "index_enhance":
         print(f"\n[3] 预计算 {index.upper()} 基准权重...")
         bm = IndexBenchmarkWeights(index=index, panel=panel)
@@ -126,6 +138,7 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
             max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
             turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
             weight_diff_l2_bound=float(opt_cfg["weight_diff_l2_bound"]) if opt_cfg.get("weight_diff_l2_bound") else None,
+            risk_aversion=risk_aversion,
         )
         optimizer = IndexEnhanceOptimizer(base_config)
 
@@ -138,6 +151,7 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
             style_bound=float(opt_cfg["style_bound"]) if opt_cfg.get("style_bound") else None,
             max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
             turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
+            risk_aversion=risk_aversion,
         )
         optimizer = AlphaMaxOptimizer(base_config)
 
@@ -173,10 +187,24 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
             top_n=int(uni_cfg["top_n"]) if uni_cfg.get("top_n") else None,
         )
 
-        barra = JYBarraFactors(
-            snapshot=snapshot, target_date=rebal_date,
-            factor_path=FACTOR_PATH, panel=panel,
-        )
+        # 风格载荷 + 风险模型来源：
+        # - CNE6 模式：暴露/协方差/特质方差均来自 CNE6 面板（19风格+行业），
+        #   无覆盖的调仓日跳过（先 2025+ 验证）
+        # - 默认模式：聚源 9 风格载荷，无因子风险模型
+        if use_cne6_risk:
+            risk_snap = cne6_rm.at(rebal_date, snapshot.tickers)
+            if risk_snap is None:
+                print(f"  [{rebal_date}] 跳过（CNE6 风险面板无覆盖）")
+                continue
+            style_loading = risk_snap.style_loading()
+        else:
+            risk_snap = None
+            barra = JYBarraFactors(
+                snapshot=snapshot, target_date=rebal_date,
+                factor_path=FACTOR_PATH, panel=panel,
+            )
+            style_loading = barra.style_loading
+
         alpha = get_alpha_for_date(alpha_df, rebal_date, snapshot.tickers)
 
         # 上期权重对齐
@@ -209,16 +237,18 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
             result = optimizer.optimize(
                 alpha=alpha, snapshot=snapshot,
                 benchmark_weight=bm_weight,
-                style_loading=barra.style_loading,
+                style_loading=style_loading,
                 prev_weight=ps,
                 cost_vector=cost_vec,
+                risk_snapshot=risk_snap,
             )
         else:
             result = optimizer.optimize(
                 alpha, snapshot,
-                style_loading=barra.style_loading,
+                style_loading=style_loading,
                 prev_weight=ps,
                 cost_vector=cost_vec,
+                risk_snapshot=risk_snap,
             )
 
         elapsed = time.time() - t0

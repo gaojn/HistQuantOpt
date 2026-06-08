@@ -24,12 +24,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import cvxpy as cp
 import numpy as np
 import pandas as pd
 
 from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
+
+if TYPE_CHECKING:
+    from portfolio_optimizer.risk.cne6_risk import RiskSnapshot
 
 
 @dataclass
@@ -46,7 +50,8 @@ class AlphaMaxConfig:
     min_constituent_ratio : float
         成分股权重下限，0 表示不约束，默认 0.0
     diversification_penalty : float
-        L2 分散惩罚系数 γ，默认 0.05。
+        L2 分散惩罚系数 γ，默认 0.05。仅在未启用因子风险模型
+        （risk_aversion=None）时生效。
         调参参考：
             0.01 ~ 0.05  轻度分散，持仓 50-100 只
             0.05 ~ 0.20  中度分散，持仓 100-200 只
@@ -65,6 +70,12 @@ class AlphaMaxConfig:
             0.005 ~ 0.02  轻度惩罚，换手下降 20-40%
             0.02  ~ 0.10  中度惩罚，换手下降 40-70%
             > 0.10        强惩罚，组合趋向保持不变
+    risk_aversion : float | None
+        因子风险厌恶系数 λ，默认 None。
+        - None：退回 L2 分散惩罚 γ·‖w‖²（向后兼容旧行为）
+        - 提供且 optimize() 传入 risk_snapshot 时：启用真因子风险模型
+          λ·(w'XFX'w + δ'w²)，刻画因子相关性与个股特质风险差异
+        与 turnover_penalty 正交：风险项控组合风险，成本项控换手。
     """
     weight_upper: float = 0.02
     industry_upper: float = 0.20
@@ -73,6 +84,7 @@ class AlphaMaxConfig:
     style_bound: float | None = 1.0
     max_turnover: float | None = None
     turnover_penalty: float = 0.0
+    risk_aversion: float | None = None
 
 
 class AlphaMaxOptimizer:
@@ -94,6 +106,7 @@ class AlphaMaxOptimizer:
         style_loading: pd.DataFrame | None = None,
         prev_weight: np.ndarray | None = None,
         cost_vector: np.ndarray | None = None,
+        risk_snapshot: "RiskSnapshot | None" = None,
     ) -> "AlphaMaxResult":
         """
         执行优化。
@@ -115,6 +128,10 @@ class AlphaMaxOptimizer:
             None 时等权（所有股票成本相同）。
             典型用法：传入相对冲击成本，如 1/sqrt(ADV_ratio)，
             使流动性差的股票换手惩罚更强。
+        risk_snapshot : RiskSnapshot | None
+            CNE6 因子风险模型（X/F/δ，已对齐 snapshot.tickers）。
+            与 config.risk_aversion 同时提供时，目标函数用真因子风险
+            λ·(w'XFX'w + δ'w²) 替代 L2 分散惩罚。
 
         Returns
         -------
@@ -205,12 +222,21 @@ class AlphaMaxOptimizer:
             if cfg.max_turnover is not None:
                 constraints.append(cp.sum(delta_w) <= cfg.max_turnover)
 
-        # ---- 目标：max w'α - γ·‖w‖² - λ·Σ c_i|Δw_i| ----
-        objective = cp.Maximize(
-            alpha @ w
-            - cfg.diversification_penalty * cp.sum_squares(w)
-            - turnover_penalty_term
-        )
+        # ---- 目标：max w'α - 风险惩罚 - 成本惩罚 ----
+        # 风险项：优先 CNE6 因子风险模型 λ·(w'XFX'w + δ'w²)，
+        #         未提供时退回 L2 分散惩罚 γ·‖w‖²（向后兼容）
+        # 成本项：加权换手惩罚 turnover_penalty_term（软约束，见上方 step 7）
+        if cfg.risk_aversion is not None and risk_snapshot is not None:
+            X = risk_snapshot.X                       # (N, K)
+            F = risk_snapshot.F                       # (K, K)
+            delta = risk_snapshot.delta               # (N,)
+            factor_risk = cp.quad_form(X.T @ w, cp.psd_wrap(F))
+            specific_risk = cp.sum(cp.multiply(delta, cp.square(w)))
+            risk_penalty = cfg.risk_aversion * (factor_risk + specific_risk)
+        else:
+            risk_penalty = cfg.diversification_penalty * cp.sum_squares(w)
+
+        objective = cp.Maximize(alpha @ w - risk_penalty - turnover_penalty_term)
 
         prob = cp.Problem(objective, constraints)
         try:
