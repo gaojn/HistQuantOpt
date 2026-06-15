@@ -24,7 +24,7 @@ optimizer:
 
 alpha:
   source: file
-  path: "alphas/alpha_vwap5_ic0.08_icir0.8_decay0.80_wide.parquet"
+  path: "alphas/alpha_vwap5_ic0.08_icir0.8_decay0.80.parquet"
 
 execution:
   cost_buy: 0.001

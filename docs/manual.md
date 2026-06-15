@@ -564,12 +564,23 @@ config 的 `alpha` 段新增 `source`：
 ```yaml
 alpha:
   source: file                          # 默认 "synthetic"（合成 Alpha，见 3.2）
-  path: "output/my_alpha.parquet"       # 宽表：index=date, columns=ticker
+  path: "output/my_alpha.parquet"       # 宽表或长表，自动识别（见下）
 ```
 
-`path` 指向的 parquet 与权重矩阵同一约定——`index` 为日期，`columns` 为股票代码，
+`load_alpha_panel` 自动识别并支持两种 parquet 格式：
+
+| 格式 | 约定 |
+|---|---|
+| 宽表 | `index`=日期，`columns`=股票代码（与权重矩阵 `weight_df.to_parquet()` 同一约定） |
+| 长表 | 列为 `(date, code, alpha)`，自动 `pivot` 为宽表 |
+
 值为因子分数（截面相对大小即可，不要求标准化）。优化时按调仓日取
 `index <= 调仓日` 的最近一行，缺失股票填0。
+
+`date`（长表为列，宽表为 index）支持多种输入形式，统一解析为 `DatetimeIndex`：
+pandas `Timestamp`/`datetime64`、`datetime.date`、日期字符串
+（`"2024-01-02"`、`"2024/01/02"` 等，含混合格式）、`YYYYMMDD` 整数或字符串
+（如 `20240102`）。
 
 也可只用 `--alpha-file` 临时覆盖任意 config 的 alpha 来源，不用改 YAML。
 
@@ -614,7 +625,8 @@ python examples/run_zz1000_enhance_vwap5_backtest.py
 ```
 
 依赖 `configs/zz1000_enhance_vwap5_test.yaml`（`alpha.source: file`，指向
-单个因子的宽表 parquet），跑中证1000指数增强的批量优化 + 真实执行回测。
+单个因子的长表 parquet，`load_alpha_panel` 自动 pivot），跑中证1000指数增强
+的批量优化 + 真实执行回测。
 
 ### 13.3 全网格批量回测
 

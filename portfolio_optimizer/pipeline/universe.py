@@ -205,20 +205,68 @@ def build_synthetic_alpha(
     return alpha_df
 
 
+def _parse_dates_flexible(values) -> pd.Index:
+    """
+    将多种日期表示形式统一解析为 DatetimeIndex。
+
+    支持：
+      - pandas Timestamp / datetime64（原生）
+      - datetime.date 对象
+      - 日期字符串（如 "2024-01-02"、"2024/01/02"）
+      - 整数/字符串形式的 YYYYMMDD（如 20240102），
+        若按默认方式解析（视为纳秒时间戳）会出现明显错误的日期，
+        因此对纯 8 位数字单独按 "%Y%m%d" 解析。
+    """
+    s = pd.Series(values)
+
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return pd.DatetimeIndex(pd.to_datetime(s))
+
+    if pd.api.types.is_integer_dtype(s) or pd.api.types.is_float_dtype(s):
+        ints = s.astype("Int64")
+        if ints.notna().all() and ((ints >= 10_000_101) & (ints <= 99_991_231)).all():
+            return pd.DatetimeIndex(
+                pd.to_datetime(ints.astype(int).astype(str), format="%Y%m%d")
+            )
+        return pd.DatetimeIndex(pd.to_datetime(s))
+
+    str_s = s.astype(str)
+    if str_s.str.fullmatch(r"\d{8}").all():
+        return pd.DatetimeIndex(pd.to_datetime(str_s, format="%Y%m%d"))
+
+    try:
+        return pd.DatetimeIndex(pd.to_datetime(s))
+    except ValueError:
+        return pd.DatetimeIndex(pd.to_datetime(s, format="mixed"))
+
+
 def load_alpha_panel(path: str | Path) -> pd.DataFrame:
     """
     从 parquet 加载外部 Alpha 因子矩阵。
 
-    约定格式：宽表，index=date，columns=ticker（与权重矩阵
-    `weight_df.to_parquet()` 同一约定），值为因子分数（截面排序/打分皆可，
-    优化器只用其截面相对大小）。
+    支持两种格式：
+      - 宽表：index=date，columns=ticker（与权重矩阵
+        `weight_df.to_parquet()` 同一约定）
+      - 长表：列为 (date, code, alpha)，自动 pivot 为宽表
+
+    `date` 列/索引支持多种输入形式（Timestamp、datetime.date、
+    日期字符串、YYYYMMDD 整数等），统一解析为 DatetimeIndex，
+    详见 `_parse_dates_flexible`。
+
+    值为因子分数（截面排序/打分皆可，优化器只用其截面相对大小）。
 
     Returns
     -------
     pd.DataFrame  index=date（DatetimeIndex），columns=ticker
     """
     alpha_df = pd.read_parquet(path)
-    alpha_df.index = pd.to_datetime(alpha_df.index)
+
+    if set(alpha_df.columns) >= {"date", "code", "alpha"}:
+        alpha_df["date"] = _parse_dates_flexible(alpha_df["date"])
+        alpha_df = alpha_df.pivot(index="date", columns="code", values="alpha")
+    else:
+        alpha_df.index = _parse_dates_flexible(alpha_df.index)
+
     alpha_df.index.name = "date"
     return alpha_df.sort_index()
 
