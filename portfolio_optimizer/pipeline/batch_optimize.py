@@ -25,6 +25,7 @@ from portfolio_optimizer.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOpti
 from portfolio_optimizer.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
 from portfolio_optimizer.pipeline.universe import (
     build_cost_vector, build_synthetic_alpha, filter_universe, get_alpha_for_date,
+    load_alpha_panel,
 )
 from portfolio_optimizer.risk import CNE6RiskModel
 
@@ -38,20 +39,30 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
+def run_batch_optimize(
+    config: str | Path | dict[str, Any],
+    panel: pl.DataFrame | None = None,
+    alpha_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
     读取 YAML 配置，执行批量组合优化，保存权重并返回权重矩阵。
 
     Parameters
     ----------
-    config_path : str | Path
-        YAML 配置文件路径（参见 configs/ 目录）
+    config : str | Path | dict
+        YAML 配置文件路径（参见 configs/ 目录），或已解析的配置 dict
+    panel : pl.DataFrame | None
+        预加载行情面板；为 None 时按配置日期范围加载（默认行为）。
+        多次调用（如扫描多个 Alpha）时传入同一面板可避免重复加载。
+    alpha_df : pd.DataFrame | None
+        预加载 Alpha 矩阵（index=date, columns=ticker）；为 None 时按
+        配置 alpha.source 加载/生成（默认行为）。
 
     Returns
     -------
     pd.DataFrame  index=date, columns=ticker, values=weight
     """
-    cfg = load_config(config_path)
+    cfg = load_config(config) if isinstance(config, (str, Path)) else config
     strategy  = cfg["strategy"]          # "index_enhance" | "alpha_max"
     index     = cfg["index"]
     bt_cfg    = cfg["backtest"]
@@ -74,31 +85,42 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
 
     # ── 加载行情 ─────────────────────────────────────────────
     data_start = date(start_date.year, 1, 1)
-    print(f"\n[1] 加载行情数据（{data_start} ~ {end_date}）...")
-    panel = load_panel(
-        data_start, end_date,
-        columns=[
-            "code", "date", "adj_close", "close",
-            "limit_up", "limit_down", "amount",
-            "float_mv", "free_mv", "total_mv",
-            "free_turnover", "trade_status",
-            "industry_l1", "list_days",
-            "is_hs300", "is_zz500", "is_zz1000", "is_st",
-        ],
-    )
-    print(f"  交易日={panel['date'].n_unique()}  股票={panel['code'].n_unique()}")
+    if panel is None:
+        print(f"\n[1] 加载行情数据（{data_start} ~ {end_date}）...")
+        panel = load_panel(
+            data_start, end_date,
+            columns=[
+                "code", "date", "adj_close", "close",
+                "limit_up", "limit_down", "amount",
+                "float_mv", "free_mv", "total_mv",
+                "free_turnover", "trade_status",
+                "industry_l1", "list_days",
+                "is_hs300", "is_zz500", "is_zz1000", "is_st",
+            ],
+        )
+        print(f"  交易日={panel['date'].n_unique()}  股票={panel['code'].n_unique()}")
+    else:
+        print(f"\n[1] 使用预加载行情数据  交易日={panel['date'].n_unique()}  股票={panel['code'].n_unique()}")
 
-    # ── 合成 Alpha ───────────────────────────────────────────
-    print(f"\n[2] 生成合成 Alpha（IC={alpha_cfg['ic_mean']}, decay={alpha_cfg['decay']}）...")
-    alpha_df = build_synthetic_alpha(
-        panel,
-        fwd_days=int(alpha_cfg["fwd_days"]),
-        ic_mean=float(alpha_cfg["ic_mean"]),
-        ic_std=float(alpha_cfg["ic_std"]),
-        decay=float(alpha_cfg["decay"]),
-        seed=int(alpha_cfg["seed"]),
-    )
-    print(f"  Alpha 矩阵: {alpha_df.shape}")
+    # ── Alpha ────────────────────────────────────────────────
+    if alpha_df is not None:
+        print(f"\n[2] 使用预加载 Alpha 矩阵")
+    else:
+        alpha_source = alpha_cfg.get("source", "synthetic")
+        if alpha_source == "file":
+            print(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
+            alpha_df = load_alpha_panel(alpha_cfg["path"])
+        else:
+            print(f"\n[2] 生成合成 Alpha（IC={alpha_cfg['ic_mean']}, decay={alpha_cfg['decay']}）...")
+            alpha_df = build_synthetic_alpha(
+                panel,
+                fwd_days=int(alpha_cfg["fwd_days"]),
+                ic_mean=float(alpha_cfg["ic_mean"]),
+                ic_std=float(alpha_cfg["ic_std"]),
+                decay=float(alpha_cfg["decay"]),
+                seed=int(alpha_cfg["seed"]),
+            )
+    print(f"  Alpha 矩阵: {alpha_df.shape}  日期 {alpha_df.index.min().date()}~{alpha_df.index.max().date()}")
 
     # ── 再平衡日 ─────────────────────────────────────────────
     trade_dates = (
@@ -117,11 +139,16 @@ def run_batch_optimize(config_path: str | Path) -> pd.DataFrame:
     # 现有 config 行为不变。
     use_cne6_risk = bool(opt_cfg.get("use_cne6_risk", False))
     risk_aversion = float(opt_cfg["risk_aversion"]) if opt_cfg.get("risk_aversion") else None
+    # cne6_data_dir：风险面板来源目录，默认 None → CNE6RiskModel 默认路径
+    # （短周期 CNE6S，data/barra_cne6/）；传 "data/barra_cne6_L" 则改用长周期
+    # CNE6L 面板（hl=252，月度以上策略），用于横向对比模型估计窗口的影响。
+    cne6_data_dir = opt_cfg.get("cne6_data_dir") or None
     cne6_rm = None
     if use_cne6_risk:
-        cne6_rm = CNE6RiskModel()
+        cne6_rm = CNE6RiskModel(data_dir=cne6_data_dir)
         cov0, cov1 = cne6_rm.coverage
-        print(f"\n[3a] 启用 CNE6 因子风险模型  覆盖={cov0}~{cov1}  λ={risk_aversion}")
+        tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6(默认/短周期S)"
+        print(f"\n[3a] 启用 CNE6 因子风险模型[{tag}]  覆盖={cov0}~{cov1}  λ={risk_aversion}")
 
     if strategy == "index_enhance":
         print(f"\n[3] 预计算 {index.upper()} 基准权重...")

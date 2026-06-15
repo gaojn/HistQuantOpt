@@ -2,6 +2,7 @@
 # 注意：必须根锚定（/ 前缀），否则 data/ 会误伤源码目录 portfolio_optimizer/data/
 /data/
 /output/
+/alphas/
 
 # Python
 __pycache__/

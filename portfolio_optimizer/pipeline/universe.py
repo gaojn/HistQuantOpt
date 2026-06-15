@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -202,6 +203,24 @@ def build_synthetic_alpha(
     alpha_df = pd.DataFrame(rows).T
     alpha_df.index.name = "date"
     return alpha_df
+
+
+def load_alpha_panel(path: str | Path) -> pd.DataFrame:
+    """
+    从 parquet 加载外部 Alpha 因子矩阵。
+
+    约定格式：宽表，index=date，columns=ticker（与权重矩阵
+    `weight_df.to_parquet()` 同一约定），值为因子分数（截面排序/打分皆可，
+    优化器只用其截面相对大小）。
+
+    Returns
+    -------
+    pd.DataFrame  index=date（DatetimeIndex），columns=ticker
+    """
+    alpha_df = pd.read_parquet(path)
+    alpha_df.index = pd.to_datetime(alpha_df.index)
+    alpha_df.index.name = "date"
+    return alpha_df.sort_index()
 
 
 def get_alpha_for_date(

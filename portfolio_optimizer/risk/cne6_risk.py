@@ -1,8 +1,11 @@
 """CNE6 因子风险模型加载器。
 
 消费 BarraCNE6 产出的逐日（防前视）风险面板：
-    data/barra_cne6/exposure_panel.parquet   —— 逐调仓日 × 个股 × 50 因子暴露 X + spec_var
-    data/barra_cne6/factor_cov_panel.parquet —— 逐调仓日 × 50×50 因子协方差 F
+    data/barra_cne6/exposure_panel.parquet   —— 逐调仓日 × 个股 × 47 因子暴露 X + spec_var
+    data/barra_cne6/factor_cov_panel.parquet —— 逐调仓日 × 47×47 因子协方差 F
+
+47 因子 = 16 风格 + Country + 30 行业（CITIC L1），由
+scripts/export_cne6_panels.py 从 ClickHouse the_quant.cne6_risk 导出。
 
 组合风险：V = X F Xᵀ + diag(δ)，其中 X=暴露(N×K)，F=因子协方差(K×K)，δ=特质方差(N,)。
 
@@ -26,11 +29,14 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-# 19 个 CNE6 风格因子（顺序与 BarraCNE6 factor_registry.STYLES 一致）
+# 16 个 CNE6 风格因子（命名与 ClickHouse cne6_risk.factor_exposure 一致）。
+# Country 因子（全市场恒为 1）不计入风格，归入非风格因子（与行业同处理，
+# 不受 style_active_bound 约束）。
 STYLE_FACTORS: tuple[str, ...] = (
-    "SIZE", "MOM", "MIDCAP", "BETA", "RESVOL", "STREV", "LTREV", "INDMOM",
-    "LIQ", "VALUE", "EARNYIELD", "GROWTH", "PROFIT", "INVQUAL", "EARNQUAL",
-    "EARNVAR", "LEVERAGE", "DIVYIELD", "SENTIMENT",
+    "Size", "MidCap", "Beta", "Momentum", "ResidualVolatility", "LongTermReversal",
+    "Liquidity", "Value", "EarningsYield", "Growth", "Profitability",
+    "InvestmentQuality", "EarningsQuality", "EarningsVariability", "Leverage",
+    "DividendYield",
 )
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "barra_cne6"

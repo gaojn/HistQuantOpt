@@ -28,6 +28,24 @@ python examples/demo_backtest.py           # 回测 + HTML 报告
 open output/backtest_report.html
 ```
 
+### CNE6 风险模型 + config 驱动批量优化（CLI）
+
+```bash
+python scripts/run_batch_optimize.py configs/zz500_enhance_cne6_horizon.yaml \
+    --alpha-file output/my_alpha.parquet   # 可选：替换为自定义 Alpha
+```
+
+详见 [manual.md §12](manual.md#12-cne6-因子风险模型--config-驱动批量优化)。
+
+### VWAP5 合成 Alpha 网格 + 批量回测
+
+```bash
+python examples/build_alphas_vwap5.py        # 生成28个不同IC/ICIR/换手的因子 -> alphas/
+python examples/run_alpha_grid_pipeline.py   # 全网格批量优化+真实回测 -> output/vwap5_grid/
+```
+
+详见 [manual.md §13](manual.md#13-vwap5-合成-alpha-网格--批量回测)。
+
 ---
 
 ## 文档说明

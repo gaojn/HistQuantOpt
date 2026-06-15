@@ -473,3 +473,160 @@ report_path = generate_html_report(
 | gro | 成长 |
 | sen | 情绪 |
 | divid | 股息 |
+
+---
+
+## 12. CNE6 因子风险模型 + config 驱动批量优化
+
+这是另一套与第 3/4 节 demo 脚本并行的流水线：用 YAML 配置 + CLI 驱动
+`portfolio_optimizer/pipeline/batch_optimize.py`，并接入真实 CNE6 因子风险模型
+（替代第 3/4 节里默认的 L2 惩罚 / 聚源 9 因子风格暴露）。
+
+### 12.1 数据来源与刷新
+
+CNE6 风险面板由 [scripts/export_cne6_panels.py](../scripts/export_cne6_panels.py)
+从 ClickHouse `the_quant.cne6_risk`（因子暴露/协方差/特质风险）+ 本地
+`data/cache/ashare_daily_<year>.parquet`（行业 one-hot）拉取，写入：
+
+| 输出目录 | 来源 | 用途 |
+|---|---|---|
+| `data/barra_cne6/` | `factor_cov_S` + `specific_risk_S` | CNE6S，短周期 hl=63（默认） |
+| `data/barra_cne6_L/` | `factor_cov_L` + `specific_risk_L` | CNE6L，长周期 hl=252 |
+
+各含 `exposure_panel.parquet`（rebal_date, code, 47因子, spec_var）和
+`factor_cov_panel.parquet`（rebal_date, factor, 47因子协方差）。
+
+**47 因子** = 16 风格 + `Country`（全市场恒为1）+ 30 行业（CITIC L1）。
+16 风格因子定义见 `portfolio_optimizer/risk/cne6_risk.py` 的 `STYLE_FACTORS`。
+
+exposure 按 `univ_flag==1`（当日可交易 + 上市满期）过滤；`Country`/行业
+不计入 `style_active_bound` 约束。
+
+刷新（ClickHouse 数据更新后重跑；仅读，需只读密码）：
+
+```bash
+CLICKHOUSE_PASSWORD=... python scripts/export_cne6_panels.py
+
+# 其余连接参数可选覆盖（默认 the_quant/dw_player）：
+# CLICKHOUSE_HOST / CLICKHOUSE_PORT / CLICKHOUSE_DB / CLICKHOUSE_USER
+```
+
+连接层见 `portfolio_optimizer/data/clickhouse_db.py`；密码只走环境变量，不入代码/git。
+行情缓存 `data/cache/ashare_daily_<year>.parquet` 的同步见
+[scripts/sync_ashare_cache.py](../scripts/sync_ashare_cache.py)
+（`CLICKHOUSE_PASSWORD=... python scripts/sync_ashare_cache.py --years 2026`）。
+
+### 12.2 CNE6RiskModel 用法
+
+```python
+from portfolio_optimizer.risk import CNE6RiskModel
+
+rm = CNE6RiskModel()                       # 默认 CNE6S（data/barra_cne6/）
+rm_l = CNE6RiskModel(data_dir="data/barra_cne6_L")  # CNE6L
+
+print(rm.coverage)        # (起始调仓日, 截止调仓日)
+snap = rm.at(target_date, tickers)   # ≤ target_date 最近调仓日；早于覆盖范围返回 None
+# snap.X (N,47) 暴露, snap.F (47,47) 因子协方差, snap.delta (N,) 特质方差
+# snap.style_loading() -> DataFrame(N, 16)，供 style_active_bound 约束使用
+```
+
+组合风险：`V = X F Xᵀ + diag(δ)`。
+
+### 12.3 config 驱动批量优化（CLI）
+
+```bash
+python scripts/run_batch_optimize.py configs/zz500_enhance_cne6_horizon.yaml
+```
+
+CLI 参数（均为可选覆盖项）：
+
+| 参数 | 作用 |
+|---|---|
+| `--alpha-file PATH` | 用外部 Alpha parquet 替代合成 Alpha（见 12.4） |
+| `--output PATH` | 覆盖 `output.weights` 路径 |
+| `--cne6-dir PATH` | 覆盖 `optimizer.cne6_data_dir`（如 `data/barra_cne6_L`） |
+| `--risk-aversion FLOAT` | 覆盖 `optimizer.risk_aversion`（λ） |
+
+config 关键字段（`optimizer` 段）：
+
+| 字段 | 说明 |
+|---|---|
+| `use_cne6_risk` | `true` 启用 CNE6 因子风险模型；`false` 走第3/4节默认 L2 惩罚 + 聚源9因子 |
+| `cne6_data_dir` | `null`→CNE6S（`data/barra_cne6/`）；`"data/barra_cne6_L"`→CNE6L |
+| `risk_aversion` | 风险厌恶系数 λ，目标函数中 `λ·wᵀΣw` |
+
+`use_cne6_risk=true` 时，调仓日早于 CNE6 面板覆盖范围（见 `rm.coverage`）会被跳过。
+
+### 12.4 自定义 Alpha 因子
+
+config 的 `alpha` 段新增 `source`：
+
+```yaml
+alpha:
+  source: file                          # 默认 "synthetic"（合成 Alpha，见 3.2）
+  path: "output/my_alpha.parquet"       # 宽表：index=date, columns=ticker
+```
+
+`path` 指向的 parquet 与权重矩阵同一约定——`index` 为日期，`columns` 为股票代码，
+值为因子分数（截面相对大小即可，不要求标准化）。优化时按调仓日取
+`index <= 调仓日` 的最近一行，缺失股票填0。
+
+也可只用 `--alpha-file` 临时覆盖任意 config 的 alpha 来源，不用改 YAML。
+
+---
+
+## 13. VWAP5 合成 Alpha 网格 + 批量回测
+
+用于批量生成一组覆盖不同 IC / ICIR / 换手率的合成 Alpha（基于未来 H=5 日
+`adj_vwap` 涨跌幅构造），并跑通"批量优化 + 真实回测"全流程，作为优化器/
+因子合成管线的输入样本测试。
+
+⚠️ 这些 Alpha 含未来信息（前视），仅用于管线测试/IR标定，不可用于实盘。
+
+### 13.1 生成因子网格
+
+```bash
+python examples/build_alphas_vwap5.py
+```
+
+构造方法与 `research/signal_grid.SignalGridRunner` 一致（AR(1) 衰减 + 截面
+z-score 混入未来收益），但 `price_col="adj_vwap"`：
+
+```
+sig_t = ρ_t · zscore(r_{t+5}) + √(1-ρ_t²) · ε,   ρ_t ~ N(ic_mean, ic_std²)
+f_t   = decay · f_{t-1} + √(1-decay²) · sig_t     (截面 z-score)
+```
+
+网格 = `signal_grid` 默认网格（IC×ICIR @ decay=0.8，+ decay 单独扫描），去重后
+28 组。输出：
+
+| 路径 | 内容 |
+|---|---|
+| `alphas/alpha_vwap5_ic{IC}_icir{ICIR}_decay{decay}.parquet` | 长表 `(date, code, alpha)` |
+| `alphas/_summary.csv` | 各因子输入参数 + 实测 IC/ICIR/自相关/换手 |
+
+`alphas/` 已加入 `.gitignore`（28 个文件共约 2GB，可随时用上述脚本重新生成）。
+
+### 13.2 单因子批量回测
+
+```bash
+python examples/run_zz1000_enhance_vwap5_backtest.py
+```
+
+依赖 `configs/zz1000_enhance_vwap5_test.yaml`（`alpha.source: file`，指向
+单个因子的宽表 parquet），跑中证1000指数增强的批量优化 + 真实执行回测。
+
+### 13.3 全网格批量回测
+
+```bash
+python examples/run_alpha_grid_pipeline.py
+```
+
+对 `alphas/alpha_vwap5_*.parquet` 逐个跑批量优化 + 真实回测，结果写入
+`output/vwap5_grid/<因子名>/{weights,nav_realistic}.parquet`、
+`report_realistic.html`，并汇总到 `output/vwap5_grid/summary.csv`
+（年化超额、IR、最大回撤、换手等）。
+
+- 支持断点续跑：已存在 `weights.parquet`/`nav_realistic.parquet` 的因子会跳过。
+- `run_batch_optimize()` 新增 `panel` / `alpha_df` 可选参数，传入预加载数据可
+  避免网格扫描时重复加载行情/重复构造 Alpha。
