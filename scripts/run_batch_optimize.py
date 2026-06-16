@@ -1,8 +1,8 @@
 """批量组合优化 CLI。
 
 用法：
-    python scripts/run_batch_optimize.py configs/zz500_enhance_cne6_horizon.yaml
-    python scripts/run_batch_optimize.py configs/zz500_enhance_cne6_horizon.yaml \\
+    python scripts/run_batch_optimize.py configs/index_enhance_demo.yaml
+    python scripts/run_batch_optimize.py configs/alpha_max_demo.yaml \\
         --alpha-file output/my_alpha.parquet \\
         --output output/my_weights.parquet \\
         --risk-aversion 20

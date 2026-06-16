@@ -17,20 +17,16 @@
 |----------|---------------|------------------------|
 | `alpha`  | `(N,)` array  | 每只股票的预期超额收益（年化）        |
 
-### 2.2 Barra CNE6 风格因子（10 个）
+### 2.2 Barra CNE6 风格因子（16 个）
 
-| 编号 | 因子名称               | 含义           |
-|----|--------------------|----|
-| 1  | Beta               | 市场贝塔         |
-| 2  | Momentum           | 动量（12-1月）    |
-| 3  | Size               | 对数总市值        |
-| 4  | EarningsYield      | 盈利预期（EP/EP预测）|
-| 5  | ResidualVolatility | 特质波动率        |
-| 6  | Growth             | 盈利成长         |
-| 7  | BookToPrice        | 账面市值比        |
-| 8  | Leverage           | 财务杠杆         |
-| 9  | Liquidity          | 流动性（换手率）     |
-| 10 | NonlinearSize      | 非线性市值        |
+来自 ClickHouse `cne6_risk`，定义见 `portfolio_optimizer/risk/cne6_risk.py::STYLE_FACTORS`：
+
+Size, MidCap, Beta, Momentum, ResidualVolatility, LongTermReversal, Liquidity,
+Value, EarningsYield, Growth, Profitability, InvestmentQuality, EarningsQuality,
+EarningsVariability, Leverage, DividendYield。
+
+风格暴露用于 `style_active_bound` 约束（支持按因子分别设定），因子协方差/特质风险
+用于 `risk_aversion` 真跟踪误差目标项。
 
 ### 2.3 行业因子
 

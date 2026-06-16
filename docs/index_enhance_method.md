@@ -202,7 +202,7 @@ $\gamma \approx 5 \sim 20$ 通常能产生合理的 TE（年化 3~6%）。
 
 ## 4. 候选池过滤
 
-代码逻辑（`examples/demo_batch_index_enhance.py::filter_universe`）：
+代码逻辑（`portfolio_optimizer/pipeline/universe.py::filter_universe`）：
 
 ```python
 universe = (
@@ -264,7 +264,7 @@ universe = (
 from portfolio_optimizer import (
     RealMarketAdapter,
     IndexBenchmarkWeights,
-    JYBarraFactors,
+    CNE6RiskModel,
     IndexEnhanceConfig,
     IndexEnhanceOptimizer,
 )
@@ -280,17 +280,19 @@ bm = IndexBenchmarkWeights(index="hs300", panel=panel)
 bm.precompute(start_date, target_date, panel=panel)
 bm_weight = bm.get_weights(target_date, tickers=snap.tickers).values
 
-# 3. Barra 风格因子
-barra = JYBarraFactors(snap, target_date, factor_path, panel=panel)
+# 3. CNE6 风格因子暴露（16 因子）
+risk_snap = CNE6RiskModel().at(target_date, snap.tickers)
+style_loading = risk_snap.style_loading()
 
-# 4. 配置
+# 4. 配置（style_active_bound 可写标量统一，或写 dict 按因子分别约束）
 cfg = IndexEnhanceConfig(
     weight_upper=0.05,
     min_constituent_ratio=0.80,
     industry_active_bound=0.05,
-    style_active_bound=0.30,
+    style_active_bound={"default": 0.30, "Size": 0.20, "Momentum": 0.20},
     tracking_penalty=10.0,
     max_turnover=0.20,
+    # risk_aversion=10.0,  # 可选：因子协方差进目标（真跟踪误差），需传 risk_snapshot
 )
 
 # 5. 优化
@@ -298,14 +300,15 @@ result = IndexEnhanceOptimizer(cfg).optimize(
     alpha=alpha_vec,
     snapshot=snap,
     benchmark_weight=bm_weight,
-    style_loading=barra.style_loading,
+    style_loading=style_loading,
     prev_weight=prev_weight_array,
+    risk_snapshot=risk_snap,   # risk_aversion 设置时用于真因子风险
 )
 
 # 6. 结果
 print(result.summary())
 print(result.industry_active_weights())      # 各行业相对基准偏离
-print(result.style_active_exposure(barra.style_loading))  # 风格主动暴露
+print(result.style_active_exposure(style_loading))  # 风格主动暴露
 print(result.top_holdings(10))                # 前10大持仓（含基准权重对比）
 ```
 

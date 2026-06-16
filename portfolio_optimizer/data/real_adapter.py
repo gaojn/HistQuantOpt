@@ -118,9 +118,15 @@ class RealMarketAdapter:
 
         # ---- 成分股标记 ----
         col_map = {"zz500": "is_zz500", "hs300": "is_hs300", "zz1000": "is_zz1000"}
-        if index not in col_map:
-            raise ValueError(f"index 须为 {list(col_map.keys())} 之一，当前：{index!r}")
-        is_constituent = today[col_map[index]].astype(bool).rename("is_constituent")
+        if index in ("all", "winda", "csiall", "market"):
+            # 全市场选股（量化选股 alpha_max）：universe 内全部视为"成分"
+            is_constituent = pd.Series(True, index=tickers, name="is_constituent")
+        elif index in col_map:
+            is_constituent = today[col_map[index]].astype(bool).rename("is_constituent")
+        else:
+            raise ValueError(
+                f"index 须为 {list(col_map.keys())} 或 'all'(全市场) 之一，当前：{index!r}"
+            )
 
         # ---- 上期持仓权重 ----
         if prev_weight is None:

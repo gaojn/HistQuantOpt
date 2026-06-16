@@ -22,7 +22,7 @@
 
 运行：
     cd /Users/guoguo/Desktop/HistQuantOpt
-    python examples/build_alphas_vwap5.py
+    python scripts/build_alphas_vwap5.py
 """
 
 import sys, os

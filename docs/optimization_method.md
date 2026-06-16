@@ -155,24 +155,32 @@ $$
 ### 3.5 风格因子绝对暴露（可选）
 
 $$
-\left| \mathbf{B}_{\text{style}}^\top \cdot w \right|_k \leq S_{\max}, \quad \forall \text{ 风格因子 } k
+\left| \mathbf{B}_{\text{style}}^\top \cdot w \right|_k \leq S_{\max,k}, \quad \forall \text{ 风格因子 } k
 $$
 
-其中 $\mathbf{B}_{\text{style}} \in \mathbb{R}^{N \times K}$ 为风格载荷矩阵，$K$ 为风格因子数（本项目用聚源 9 个）。
+其中 $\mathbf{B}_{\text{style}} \in \mathbb{R}^{N \times K}$ 为风格载荷矩阵，$K$ 为风格因子数（本项目用 CNE6 16 个）。
+约束上限 $S_{\max,k}$ 支持**按因子分别设定**（`style_active_bound` 可写标量统一，或写 dict 按因子名分别约束，见第 7 节配置）。
 
-**包含的 9 个风格因子：**
+**包含的 16 个 CNE6 风格因子：**
 
-| 因子 | 含义 | 含义说明 |
-|---|---|---|
-| Size | 规模 | 流通市值对数 |
-| Momentum | 动量 | 12-1月收益 |
-| ResidualVolatility | 残差波动率 | Beta 回归残差的滚动 std |
-| Liquidity | 流动性 | 换手率 |
-| EarningsYield | 盈利收益 | E/P |
-| BookToPrice | 账面市值比 | B/P |
-| Growth | 成长 | 营收/利润增速 |
-| Sentiment | 情绪 | 分析师预期变动 |
-| Dividend | 股息 | 股息率 |
+| 因子 | 含义 |
+|---|---|
+| Size | 规模 |
+| MidCap | 中盘 |
+| Beta | 市场 Beta |
+| Momentum | 动量 |
+| ResidualVolatility | 残差波动率 |
+| LongTermReversal | 长期反转 |
+| Liquidity | 流动性 |
+| Value | 价值 |
+| EarningsYield | 盈利收益 |
+| Growth | 成长 |
+| Profitability | 盈利能力 |
+| InvestmentQuality | 投资质量 |
+| EarningsQuality | 盈利质量 |
+| EarningsVariability | 盈利波动 |
+| Leverage | 杠杆 |
+| DividendYield | 股息率 |
 
 **典型设置：**
 
@@ -501,7 +509,7 @@ from pathlib import Path
 from histquant.io.data_panel import load_panel
 from portfolio_optimizer import (
     RealMarketAdapter,
-    JYBarraFactors,
+    CNE6RiskModel,
     AlphaMaxConfig,
     AlphaMaxOptimizer,
 )
@@ -526,13 +534,9 @@ snapshot = RealMarketAdapter().build_snapshot_from_panel(
     portfolio_value=1e8,
 )
 
-# 3. 加载风格因子
-barra = JYBarraFactors(
-    snapshot=snapshot,
-    target_date=target,
-    factor_path=Path("data/jy_stylefactor_000985_CSI_20230209_20260522.parquet"),
-    panel=panel,
-)
+# 3. 加载 CNE6 风险模型（16 风格因子暴露 + 协方差），取目标日快照
+risk_snap = CNE6RiskModel().at(target, snapshot.tickers)
+style_loading = risk_snap.style_loading()
 
 # 4. Alpha（实际场景从研究员模型导入）
 alpha = your_alpha_signal  # shape (N,)
@@ -551,7 +555,7 @@ config = AlphaMaxConfig(
 result = AlphaMaxOptimizer(config).optimize(
     alpha=alpha,
     snapshot=snapshot,
-    style_loading=barra.style_loading,
+    style_loading=style_loading,
     prev_weight=None,   # 首期建仓
 )
 
@@ -559,7 +563,7 @@ result = AlphaMaxOptimizer(config).optimize(
 print(result.summary())
 print(result.top_holdings(10))
 print(result.industry_weights().head())
-print(result.style_exposures(barra.style_loading))
+print(result.style_exposures(style_loading))
 ```
 
 ---
