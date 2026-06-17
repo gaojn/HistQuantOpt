@@ -14,7 +14,6 @@ universe:
 
 optimizer:
   weight_upper: 0.01
-  weight_lower: 0.0
   min_constituent_ratio: 0.80
   industry_active_bound: 0.07
   # 风格约束（CNE6 16 因子）：可写标量统一约束，或写 dict 按因子分别约束。
@@ -29,7 +28,7 @@ optimizer:
   # cne6_data_dir: data/barra_cne6_L   # 可选：改用长周期面板（默认短周期 S）
   # risk_aversion: 10.0                # 可选：因子协方差进目标（真跟踪误差），不设则用 L2 惩罚
   tracking_penalty: 10.0
-  max_turnover: 0.40
+  max_turnover: 0.40       # 双边换手硬上限：sum(abs(w-w_prev)) <= 40%，约等于单边换手 <= 20%
   weight_diff_l2_bound: null
 
 alpha:

@@ -14,13 +14,12 @@ dependencies = [
     "pandas>=2.0",
     "pydantic>=2.0",
     "pyyaml",
+    "cvxpy>=1.4",        # 凸优化（顶层 import portfolio_optimizer 即需要）
+    "clarabel>=0.7",     # CLARABEL solver
+    "plotly>=5.0",       # HTML 报告
 ]
 
 [project.optional-dependencies]
-opt = [
-    "cvxpy>=1.4",        # 凸优化
-    "clarabel>=0.7",     # CLARABEL solver
-]
 dev = [
     "pytest>=8.0",
     "ruff",

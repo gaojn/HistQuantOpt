@@ -57,8 +57,6 @@ class IndexEnhanceConfig:
     ----------
     weight_upper : float
         单票绝对权重上限（默认 5%，容纳基准重仓股如茅台/宁德 ~5%）
-    weight_lower : float
-        单票权重下限，默认 0
     min_constituent_ratio : float
         成分股权重下限（HS300 ≥ 80%）
     industry_active_bound : float
@@ -91,7 +89,6 @@ class IndexEnhanceConfig:
         与 turnover_penalty 正交：风险项控主动风险，成本项控换手。
     """
     weight_upper: float = 0.05
-    weight_lower: float = 0.0
     min_constituent_ratio: float = 0.80
     industry_active_bound: float = 0.05
     style_active_bound: float | dict[str, float] = 0.30

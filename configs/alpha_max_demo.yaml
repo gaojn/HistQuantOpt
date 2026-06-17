@@ -18,7 +18,7 @@ optimizer:
   min_constituent_ratio: 0.0    # 全市场，无成分约束
   diversification_penalty: 0.05 # 分散度惩罚
   style_bound: 1.0              # 风格因子绝对暴露上限（±1σ，CNE6）
-  max_turnover: 0.40
+  max_turnover: 0.40           # 双边换手硬上限：sum(abs(w-w_prev)) <= 40%，约等于单边换手 <= 20%
   turnover_penalty: 0.0
   # risk_aversion: 10.0         # 可选：CNE6 因子协方差进目标
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
+from portfolio_optimizer.data.generator import MarketSnapshot
 
 
 class AlphaFactors:

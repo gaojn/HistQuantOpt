@@ -42,8 +42,6 @@ def build_cost_vector(
     np.ndarray, shape (N,)
         归一化成本权重，中位数=1，缺失/异常值填 1.0（等权）
     """
-    ts = pd.Timestamp(target_date)
-
     # 取目标日之前（含）lookback 个交易日
     avail_dates = sorted(
         panel.filter(pl.col("date") <= target_date)

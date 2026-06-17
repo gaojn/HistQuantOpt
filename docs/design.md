@@ -47,7 +47,7 @@ $$\Sigma = B F B^\top + \Delta$$
 | $F$       | $(K \times K)$  | 因子协方差矩阵（正定）              |
 | $\Delta$  | $(N \times N)$  | 特质风险矩阵（对角矩阵）             |
 | $N$       | —               | 股票数量                     |
-| $K$       | —               | 因子数量 = 10（风格）+ 30（行业）= 40 |
+| $K$       | —               | 因子数量 = 16（风格）+ Country + 30（行业）= 47 |
 
 ### 3.2 组合风险分解
 
@@ -85,15 +85,15 @@ $$|B_{\text{ind}}^\top w - B_{\text{ind}}^\top w_{\text{bm}}| \leq \varepsilon_{
 
 #### 换手率约束
 
-$$\sum_{i \notin \mathcal{S}} |w_i - w_{0,i}| \leq T_{\max}$$
+$$\|w - w_0\|_1 \leq T_{\max}$$
 
-其中 $\mathcal{S}$ 为停牌股票集合（排除在换手率计算之外）。
+当前实现按目标权重计算双边换手；停牌若被目标卖出，会计入目标换手，
+真实成交由回测引擎延期处理。
 
 #### 流动性约束
 
-$$|w_i - w_{0,i}| \cdot V_p \leq \rho \cdot \text{ADV}_i \quad \forall i$$
-
-其中 $V_p$ 为组合总市值，$\rho$ 为最大市场参与率（如 20%），$\text{ADV}_i$ 为近 20 日平均成交额。
+当前实现没有 ADV 参与率硬约束，而是通过 `turnover_penalty` 与
+`build_cost_vector()` 对低流动性股票施加更高换手惩罚。
 
 ---
 
@@ -104,16 +104,16 @@ $$|w_i - w_{0,i}| \cdot V_p \leq \rho \cdot \text{ADV}_i \quad \forall i$$
 | 状态            | 说明         | 优化器处理                                         |
 |---------------|------------|-----------------------------------------------|
 | `NORMAL`      | 正常交易       | 无特殊限制                                         |
-| `SUSPENDED`   | 停牌         | 强制 $w_i = w_{0,i}$（等式约束）                      |
+| `SUSPENDED`   | 停牌         | 目标权重 $w_i = 0$，真实回测不可成交并延期处理                  |
 | `LIMIT_UP`    | 涨停（无法买入）   | $w_i \leq w_{0,i}$（只能减仓或持有）                   |
 | `LIMIT_DOWN`  | 跌停（无法卖出）   | $w_i \geq w_{0,i}$（只能加仓或持有，实际通常视为 SUSPENDED） |
 | `NEW_LISTING` | 上市首日/次新股  | $w_i = 0$（禁止持仓，规避炒作风险）                        |
 
-### 5.2 停牌股票的预算约束修正
+### 5.2 停牌股票的目标权重与真实成交
 
-停牌股票权重固定，设 $w_{\mathcal{S}}$ 为停牌股票总权重，则可交易股票满足：
-
-$$\sum_{i \notin \mathcal{S}} w_i = 1 - \sum_{i \in \mathcal{S}} w_{0,i}$$
+当前优化器输出的是目标权重，不是已经执行后的真实持仓。停牌股票在目标组合中
+可被置为 0，表达“希望卖出”的意图；真实回测中停牌不可交易，卖单会延期到
+复牌且可成交时执行。停牌期间仍按行情前值填充价格估值，避免 NAV 断裂。
 
 ---
 
@@ -122,17 +122,27 @@ $$\sum_{i \notin \mathcal{S}} w_i = 1 - \sum_{i \in \mathcal{S}} w_{0,i}$$
 ```
 portfolio_optimizer/
 ├── data/
-│   └── generator.py        # 随机生成股票数据、因子、ADV、交易状态
+│   ├── real_adapter.py     # parquet 面板 → MarketSnapshot
+│   ├── benchmark.py        # 分级靠档指数成分权重
+│   ├── index_close.py      # 官方指数收盘价加载（回测基准）
+│   ├── clickhouse_db.py    # ClickHouse 只读连接层
+│   └── generator.py        # 合成数据/快照构件
+├── io/
+│   ├── data_panel.py       # load_panel 主入口
+│   └── schema.py           # 行情字段定义
 ├── factors/
-│   ├── alpha_factors.py    # Alpha 因子容器与标准化
-│   └── barra_factors.py   # CNE6 风格 + 行业因子生成
+│   └── alpha_factors.py    # Alpha 预处理（去极值/标准化）
 ├── risk/
-│   └── risk_model.py       # 因子风险模型（B, F, Δ）
+│   └── cne6_risk.py        # CNE6 因子风险模型（暴露 X / 协方差 F / 特质 Δ）
 ├── optimizer/
-│   ├── constraints.py      # 约束构建器（可组合）
-│   └── mean_variance.py   # cvxpy 均值方差优化器
-└── portfolio/
-    └── portfolio.py        # 优化结果、风险分解、归因
+│   ├── alpha_max.py        # 量化选股 QP 优化器
+│   └── index_enhance.py    # 指数增强 QP 优化器
+├── backtest/
+│   ├── engine.py           # 真实执行回测（T+1 VWAP/涨跌停/成本）+ 绩效指标
+│   └── report.py           # Plotly HTML 报告
+└── pipeline/
+    ├── batch_optimize.py   # 逐期批量优化（两策略）
+    └── universe.py         # 候选池过滤 / 成本向量 / 合成 alpha
 ```
 
 ---
@@ -140,38 +150,35 @@ portfolio_optimizer/
 ## 7. 数据流
 
 ```
-随机数据生成
-    │
-    ├──► Alpha 因子 (N,)
-    ├──► Barra 因子载荷 B (N×K)
-    ├──► 因子协方差 F (K×K)
-    ├──► 特质风险 Δ (N,)
-    ├──► ADV (N,)  ← 流动性约束
-    └──► 交易状态 (N,)  ← 停牌/涨跌停
-            │
-            ▼
-        风险模型 Σ = BFB' + Δ
-            │
-            ▼
-        约束构建器
-        ├── TradingStatusConstraint   ← 停牌/涨跌停
-        ├── LiquidityConstraint       ← ADV 参与率
-        ├── FactorExposureConstraint  ← 因子中性
-        ├── IndustryConstraint        ← 行业中性
-        └── TurnoverConstraint        ← 换手率
-            │
-            ▼
-        cvxpy 求解器
-            │
-            ▼
-        Portfolio（权重 + 风险分解 + 成交金额）
+行情面板 load_panel（data/cache）          CNE6 面板（data/barra_cne6[_L]）
+    │                                            │
+    ▼                                            ▼
+RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
+  → MarketSnapshot                         → 暴露 X / 协方差 F / 特质 Δ / style_loading
+  （tickers/行业/ADV/状态/市值/成分）              │
+    │            ┌───────── Alpha 因子（alphas/*.parquet）
+    ▼            ▼          │
+  filter_universe  ────────►│
+    │                       ▼
+    └────────────►  optimizer（alpha_max / index_enhance, cvxpy）
+                            │  约束：预算/单票上限/行业/风格(CNE6)/换手/涨跌停/停牌
+                            ▼
+                    逐期权重矩阵 weight_df
+                            │
+                            ▼
+                RealisticBacktester（T+1 VWAP / 涨跌停 / 成本）
+                  基准：官方指数收盘价（index_close）
+                            │
+                            ▼
+                generate_html_report → HTML + parquet
 ```
 
 ---
 
 ## 8. 关键设计决策
 
-1. **因子风险用 Cholesky 分解加速**：将 `quad_form(w, Sigma)` 拆成两个 `sum_squares`，避免大矩阵求逆。
-2. **停牌股从优化变量中分离**：停牌股不进入优化，减少变量数量，预算约束相应调整。
-3. **约束可组合**：每个约束类返回 `List[cp.Constraint]`，优化器统一收集。
-4. **流动性约束用绝对金额**：以 ADV 的百分比限制单日换手，框架外部传入组合总市值。
+1. **风险项两档**：`risk_aversion` 设置时用 CNE6 真因子风险 `λ·(active'XFX'active+δ'active²)`；否则退回 L2 偏离惩罚 `γ·‖w−w_bm‖²`。
+2. **交易状态约束（实现口径）**：停牌/次新在优化中约束为 `w=0`（alpha 置 0）；涨停 `w≤w_prev`、跌停 `w≥w_prev`。真实回测中涨停不可买（留现金）、跌停不可卖（进延期队列）、停牌不可交易。
+   > 说明：行情数据在停牌日对价格字段（adj_close / adj_vwap）做**前值填充**（仅 volume/amount 为 0），因此停牌持仓按最近价估值（NAV 不失真），停牌卖单 `exec_p>0` 会正确进入延期队列、复牌后成交。优化阶段目标 `w=0`（意图卖出）+ 回测延期卖出，整体自洽且贴近现实。
+3. **流动性为软惩罚（非硬约束）**：通过 `turnover_penalty` + 个股冲击成本向量（基于 ADV）软性压制换手，未实现 ADV 参与率硬约束。
+4. **求解器**：优先 CLARABEL，失败降级 SCS 兜底。

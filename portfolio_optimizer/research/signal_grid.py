@@ -21,8 +21,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
-
 import numpy as np
 import pandas as pd
 import polars as pl

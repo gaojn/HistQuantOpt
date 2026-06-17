@@ -108,7 +108,7 @@ def run_batch_optimize(
 
     # ── Alpha ────────────────────────────────────────────────
     if alpha_df is not None:
-        print(f"\n[2] 使用预加载 Alpha 矩阵")
+        print("\n[2] 使用预加载 Alpha 矩阵")
     else:
         alpha_source = alpha_cfg.get("source", "synthetic")
         if alpha_source == "file":
@@ -159,7 +159,6 @@ def run_batch_optimize(
 
         base_config = IndexEnhanceConfig(
             weight_upper=float(opt_cfg["weight_upper"]),
-            weight_lower=float(opt_cfg.get("weight_lower", 0.0)),
             min_constituent_ratio=float(opt_cfg["min_constituent_ratio"]),
             industry_active_bound=float(opt_cfg["industry_active_bound"]),
             style_active_bound=_parse_style_bound(opt_cfg["style_active_bound"]),
@@ -190,7 +189,7 @@ def run_batch_optimize(
     )
 
     # ── 逐期优化 ─────────────────────────────────────────────
-    print(f"\n[4] 逐期优化...")
+    print("\n[4] 逐期优化...")
     t_total = time.time()
     weight_records: dict = {}
     prev_w_arr, prev_tickers = None, None

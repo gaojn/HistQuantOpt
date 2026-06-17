@@ -10,7 +10,8 @@
     python scripts/run_index_enhance_demo.py
 """
 
-import sys, os
+import os
+import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date
@@ -20,7 +21,7 @@ import pandas as pd
 
 from portfolio_optimizer.io.data_panel import load_panel
 from portfolio_optimizer.data.index_close import load_index_returns
-from portfolio_optimizer.backtest.realistic_engine import RealisticBacktester
+from portfolio_optimizer.backtest.engine import RealisticBacktester
 from portfolio_optimizer.backtest.report import generate_html_report
 from portfolio_optimizer.pipeline.batch_optimize import run_batch_optimize, load_config
 
@@ -50,7 +51,7 @@ def main() -> None:
     print(f"  区间: {start_date} ~ {end_date}  换仓: {cfg['backtest']['rebalance_freq']} 日")
     print(f"{'='*70}")
 
-    print(f"\n[1] 加载行情数据...")
+    print("\n[1] 加载行情数据...")
     panel = load_panel(
         date(start_date.year, 1, 1), end_date,
         columns=[
@@ -88,7 +89,7 @@ def main() -> None:
     )
     bm_ret.name = INDEX.upper()
 
-    print(f"\n[4] 优化权重（CNE6 风险模型）...")
+    print("\n[4] 优化权重（CNE6 风险模型）...")
     cfg["output"]["weights"] = str(OUT_DIR / "weights.parquet")
     weight_df = run_batch_optimize(cfg, panel=panel, alpha_df=alpha_long_to_wide(ALPHA_PATH))
     weight_df.index = pd.to_datetime(weight_df.index)
