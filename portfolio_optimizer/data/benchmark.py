@@ -129,7 +129,6 @@ class IndexBenchmarkWeights:
         pd.DataFrame
             index=date，columns=ticker，values=权重
         """
-        cache = self._get_or_build_cache()
         result = {}
         for d in dates:
             result[d] = self.get_weights(d, tickers)

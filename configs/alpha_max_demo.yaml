@@ -1,0 +1,35 @@
+strategy: alpha_max
+index: all                # 量化选股：全市场选股（对标万得全A）
+
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2026-05-31"
+  rebalance_freq: 10        # 10 个交易日换仓一次
+  initial_value: 100000000
+
+universe:
+  exclude_bj: true
+  exclude_st: true
+  top_n: null               # 不限，全市场
+
+optimizer:
+  weight_upper: 0.02            # 单票上限 2%
+  industry_upper: 0.20          # 单行业上限 20%
+  min_constituent_ratio: 0.0    # 全市场，无成分约束
+  diversification_penalty: 0.05 # 分散度惩罚
+  style_bound: 1.0              # 风格因子绝对暴露上限（±1σ，CNE6）
+  max_turnover: 0.40           # 双边换手硬上限：sum(abs(w-w_prev)) <= 40%，约等于单边换手 <= 20%
+  turnover_penalty: 0.0
+  # risk_aversion: 10.0         # 可选：CNE6 因子协方差进目标
+
+alpha:
+  source: file
+  path: "alphas/alpha_vwap5_ic0.12_icir1.2_decay0.80.parquet"
+
+execution:
+  cost_buy: 0.001
+  cost_sell: 0.002
+  risk_free: 0.02
+
+output:
+  weights: "output/alpha_max_demo/weights.parquet"

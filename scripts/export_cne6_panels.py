@@ -34,6 +34,10 @@ from portfolio_optimizer.data.clickhouse_db import query_df
 CACHE_DIR = Path("data/cache")
 OUT_DIRS = {"S": Path("data/barra_cne6"), "L": Path("data/barra_cne6_L")}
 
+# 提取时间范围（含端点）；按需调整
+START_DATE = "2020-01-01"
+END_DATE = "2026-05-31"
+
 # 16 个 CNE6 风格因子（命名与 cne6_risk.factor_exposure 一致）
 STYLE_FACTORS: tuple[str, ...] = (
     "Size", "MidCap", "Beta", "Momentum", "ResidualVolatility", "LongTermReversal",
@@ -53,6 +57,7 @@ def load_exposure_base() -> pl.DataFrame:
         {pivot_cols}
         FROM cne6_risk.factor_exposure
         WHERE univ_flag = 1
+          AND asof_date BETWEEN '{START_DATE}' AND '{END_DATE}'
         GROUP BY asof_date, code
     """
     df = query_df(sql)
@@ -75,7 +80,10 @@ def load_industry_dummies() -> tuple[pl.DataFrame, list[str]]:
 
 
 def load_factor_cov(variant: str) -> pl.DataFrame:
-    cov = query_df(f"SELECT trade_date, factor_i, factor_j, cov FROM cne6_risk.factor_cov_{variant}")
+    cov = query_df(
+        f"SELECT trade_date, factor_i, factor_j, cov FROM cne6_risk.factor_cov_{variant} "
+        f"WHERE trade_date BETWEEN '{START_DATE}' AND '{END_DATE}'"
+    )
     swapped = cov.rename({"factor_i": "factor_j", "factor_j": "factor_i"}).select(cov.columns)
     sym = pl.concat([cov, swapped]).unique(subset=["trade_date", "factor_i", "factor_j"])
     wide = sym.pivot(index=["trade_date", "factor_i"], on="factor_j", values="cov")
@@ -85,7 +93,10 @@ def load_factor_cov(variant: str) -> pl.DataFrame:
 
 
 def load_spec_var(variant: str) -> pl.DataFrame:
-    sr = query_df(f"SELECT trade_date, code, var FROM cne6_risk.specific_risk_{variant}")
+    sr = query_df(
+        f"SELECT trade_date, code, var FROM cne6_risk.specific_risk_{variant} "
+        f"WHERE trade_date BETWEEN '{START_DATE}' AND '{END_DATE}'"
+    )
     return sr.rename({"trade_date": "rebal_date", "var": "spec_var"}).with_columns(
         pl.col("rebal_date").cast(pl.Date)
     )

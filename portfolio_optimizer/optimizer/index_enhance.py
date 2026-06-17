@@ -34,6 +34,19 @@ from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
 if TYPE_CHECKING:
     from portfolio_optimizer.risk.cne6_risk import RiskSnapshot
 
+# 未列出且无 default 时，用极大值表示"不约束"（避免 cvxpy 的 inf 问题）
+_UNBOUNDED = 1e6
+
+
+def _resolve_style_bounds(
+    bound: "float | dict[str, float]", factor_names: "pd.Index | list[str]"
+) -> np.ndarray:
+    """把 style_active_bound（float 或 dict）展开成与因子列对齐的 K 维上限向量。"""
+    if isinstance(bound, dict):
+        default = bound.get("default", _UNBOUNDED)
+        return np.array([float(bound.get(f, default)) for f in factor_names], dtype=float)
+    return np.full(len(factor_names), float(bound), dtype=float)
+
 
 @dataclass
 class IndexEnhanceConfig:
@@ -44,14 +57,16 @@ class IndexEnhanceConfig:
     ----------
     weight_upper : float
         单票绝对权重上限（默认 5%，容纳基准重仓股如茅台/宁德 ~5%）
-    weight_lower : float
-        单票权重下限，默认 0
     min_constituent_ratio : float
         成分股权重下限（HS300 ≥ 80%）
     industry_active_bound : float
         行业相对基准偏离上限（±5%）
-    style_active_bound : float
-        风格因子主动暴露上限（±0.3σ）
+    style_active_bound : float | dict[str, float]
+        风格因子主动暴露上限（±x σ）。
+        - float：所有风格因子统一上限（如 0.30 → 每个因子 ±0.3σ）
+        - dict：按因子名分别约束，可含 "default" 键作为未列出因子的兜底，
+          例：{"default": 0.3, "Momentum": 0.2, "Size": 0.5}
+          （未列出且无 default 时该因子不约束）
     tracking_penalty : float
         跟踪误差惩罚系数 γ（越大越像基准）。仅在未启用因子风险模型
         （risk_aversion=None）时生效。
@@ -74,10 +89,9 @@ class IndexEnhanceConfig:
         与 turnover_penalty 正交：风险项控主动风险，成本项控换手。
     """
     weight_upper: float = 0.05
-    weight_lower: float = 0.0
     min_constituent_ratio: float = 0.80
     industry_active_bound: float = 0.05
-    style_active_bound: float = 0.30
+    style_active_bound: float | dict[str, float] = 0.30
     tracking_penalty: float = 10.0
     max_turnover: float | None = 0.20
     turnover_penalty: float = 0.0
@@ -163,12 +177,13 @@ class IndexEnhanceOptimizer:
             constraints.append(active_ind <= cfg.industry_active_bound)
             constraints.append(active_ind >= -cfg.industry_active_bound)
 
-        # 6. 风格因子主动暴露
+        # 6. 风格因子主动暴露（支持按因子分别约束）
         if style_loading is not None:
             B = style_loading.reindex(tickers).fillna(0.0).values  # (N, K)
             active_exp = B.T @ (w - w_bm)
-            constraints.append(active_exp <= cfg.style_active_bound)
-            constraints.append(active_exp >= -cfg.style_active_bound)
+            bound_vec = _resolve_style_bounds(cfg.style_active_bound, style_loading.columns)
+            constraints.append(active_exp <= bound_vec)
+            constraints.append(active_exp >= -bound_vec)
 
         # 7. 换手约束与惩罚
         turnover_penalty_term = 0.0
