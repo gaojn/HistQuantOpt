@@ -184,6 +184,12 @@ class RealisticBacktester:
         -------
         (BacktestResult, execution_stats dict)
         """
+        # 统一 weight_df.index 为 pd.Timestamp，防止与 adj_close.index 类型不一致
+        # 导致 `date in set(rebal_dates)` 永远不匹配
+        if not isinstance(weight_df.index, pd.DatetimeIndex):
+            weight_df = weight_df.copy()
+            weight_df.index = pd.to_datetime(weight_df.index)
+
         rebal_dates = sorted(weight_df.index)
         first_rebal = rebal_dates[0]
 
