@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "histquant"
+name = "HistQuantOpt"
 version = "0.1.0"
 description = "A-share multi-factor portfolio optimization framework"
 requires-python = ">=3.11"
@@ -25,6 +25,9 @@ dev = [
     "ruff",
     "black",
 ]
+
+[project.scripts]
+hqopt = "portfolio_optimizer.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

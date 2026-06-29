@@ -47,7 +47,7 @@ class RiskSnapshot:
     """某调仓日、对齐到给定 tickers 的因子风险模型。"""
     as_of: date                 # 实际取用的面板调仓日（≤ 请求日）
     tickers: list[str]
-    factor_names: list[str]     # 50：风格 + 行业，顺序与 X 列、F 行列一致
+    factor_names: list[str]     # 47：16 风格 + Country + 30 行业，顺序与 X 列、F 行列一致
     X: np.ndarray               # (N, K) 因子暴露
     F: np.ndarray               # (K, K) 因子协方差（对称 PSD）
     delta: np.ndarray           # (N,)   特质方差
@@ -61,7 +61,7 @@ class RiskSnapshot:
         return [f for f in self.factor_names if f not in STYLE_FACTORS]
 
     def style_loading(self) -> pd.DataFrame:
-        """风格暴露子矩阵（N×19，index=tickers），兼容现有风格约束接口。"""
+        """风格暴露子矩阵（N×16，index=tickers），兼容现有风格约束接口。"""
         sidx = [self.factor_names.index(s) for s in self.style_names]
         return pd.DataFrame(
             self.X[:, sidx], index=self.tickers, columns=self.style_names
@@ -73,7 +73,7 @@ def _load_panels(data_dir: str) -> tuple[pl.DataFrame, dict, list[date]]:
     """加载并预处理风险面板（按 data_dir 缓存，避免重复 IO）。
 
     Returns:
-        exposure: polars DF（rebal_date, code, <50因子>, spec_var）
+        exposure: polars DF（rebal_date, code, <47因子>, spec_var）
         cov_by_date: {rebal_date: (factor_names, F 矩阵 K×K)}
         rebal_dates: 升序调仓日列表
     """

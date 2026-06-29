@@ -5,7 +5,9 @@
 供回测/报告作为基准（benchmark）使用。
 
 CSV 格式（宽表）：
-    date(YYYYMMDD), 沪深300, 中证500, 中证800, 中证1000, 中证全指, 中证红利, 万得全A
+    date(YYYYMMDD), 沪深300, 中证500, 中证800, 中证1000, 中证全指, 中证红利
+
+CSV 由 scripts/export_index_close.py 从 wind_db.AINDEXEODPRICES 导出（可重跑刷新）。
 
 用法::
 
@@ -30,8 +32,8 @@ _INDEX_COL: dict[str, str] = {
     "zz1000": "中证1000",
     "csiall": "中证全指",      # 000985 中证全指
     "zzall": "中证全指",
-    "winda": "万得全A",
-    "wanda": "万得全A",
+    "winda": "中证全指",       # 万得全A(881001.WI) wind_db 无，用中证全指近似全市场
+    "wanda": "中证全指",
     "dividend": "中证红利",
 }
 

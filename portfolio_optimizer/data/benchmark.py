@@ -37,6 +37,11 @@ import polars as pl
 
 from portfolio_optimizer.io.data_panel import load_panel
 
+# 官方成分权重 parquet（由 scripts/export_index_weight.py 从 wind_db 导出）
+DEFAULT_OFFICIAL_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "index_weight" / "official_weight.parquet"
+)
+
 
 class IndexBenchmarkWeights:
     """
@@ -61,14 +66,34 @@ class IndexBenchmarkWeights:
         index: str = "zz500",
         panel: pl.DataFrame | None = None,
         cache_dir: Path | str | None = None,
+        source: str = "official",
+        official_path: Path | str | None = None,
     ) -> None:
+        """
+        Parameters
+        ----------
+        source : str
+            基准权重来源：
+            - "official"（默认）：用 wind_db 导出的官方成分权重（月度快照，
+              按调仓日 asof 取 ≤当日最近快照）；官方未覆盖的日期/指数
+              自动回退到 free_mv 分级靠档重构。
+            - "reconstruct"：始终用 free_mv 重构（不读官方权重）。
+        official_path : Path | str | None
+            官方权重 parquet 路径，None 用默认 data/index_weight/official_weight.parquet。
+        """
         if index not in self._INDEX_COL:
             raise ValueError(f"index 须为 {list(self._INDEX_COL)} 之一")
+        if source not in ("official", "reconstruct"):
+            raise ValueError("source 须为 'official' 或 'reconstruct'")
         self.index = index
         self._col = self._INDEX_COL[index]
         self._cache_dir = Path(cache_dir) if cache_dir else None
         self._panel = panel
-        self._weight_cache: pd.DataFrame | None = None   # (date, ticker) → weight
+        self._weight_cache: pd.DataFrame | None = None   # (date, ticker) → weight，free_mv 重构
+        self.source = source
+        self._official_path = Path(official_path) if official_path else DEFAULT_OFFICIAL_PATH
+        self._official_cache: pd.DataFrame | None = None  # date × code，官方权重
+        self._official_loaded = False
 
     # ------------------------------------------------------------------
     # Public
@@ -94,6 +119,16 @@ class IndexBenchmarkWeights:
         pd.Series
             index=ticker，value=权重（合计≈1）
         """
+        # 优先官方权重（月度快照，asof 取 ≤target 最近日）
+        if self.source == "official":
+            oc = self._get_official_cache()
+            if oc is not None and len(oc):
+                avail = [d for d in oc.index if d <= target_date]
+                if avail:
+                    w = oc.loc[avail[-1]].dropna()
+                    return self._finalize(w, tickers)
+            # 官方未覆盖（早于起点 / 无该指数）→ 回退 free_mv 重构
+
         cache = self._get_or_build_cache()
 
         if target_date not in cache.index:
@@ -104,16 +139,17 @@ class IndexBenchmarkWeights:
             target_date = avail[-1]
 
         w = cache.loc[target_date].dropna()
-        w = w[w > 0]
+        return self._finalize(w, tickers)
 
+    @staticmethod
+    def _finalize(w: pd.Series, tickers: list[str] | None) -> pd.Series:
+        """对齐 tickers 并强制归一化（成分股权重缺失时和可能 < 1）。"""
+        w = w[w > 0]
         if tickers is not None:
             w = w.reindex(tickers).fillna(0.0)
-
-        # 强制归一化：部分成分股 free_mv 缺失时权重之和可能 < 1
         total = w.sum()
         if total > 1e-8:
             w = w / total
-
         return w.rename("bm_weight")
 
     def get_weights_matrix(
@@ -149,11 +185,31 @@ class IndexBenchmarkWeights:
         """
         if panel is not None:
             self._panel = panel
-        self._weight_cache = self._build_weight_matrix(start_date, end_date)
+        if self.source == "official":
+            self._get_official_cache()   # 预热官方；free_mv 重构兜底惰性按需
+        else:
+            self._weight_cache = self._build_weight_matrix(start_date, end_date)
 
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
+
+    def _get_official_cache(self) -> pd.DataFrame | None:
+        """加载该指数官方权重（date × code），文件缺失/无该指数返回 None。"""
+        if self._official_loaded:
+            return self._official_cache
+        self._official_loaded = True
+        self._official_cache = None
+        if not self._official_path.exists():
+            return None
+        df = pl.read_parquet(self._official_path).filter(pl.col("index") == self.index)
+        if df.is_empty():
+            return None
+        pdf = df.select(["date", "code", "weight"]).to_pandas()
+        wide = pdf.pivot(index="date", columns="code", values="weight")
+        wide.index = pd.to_datetime(wide.index).date
+        self._official_cache = wide.sort_index()
+        return self._official_cache
 
     def _get_or_build_cache(self) -> pd.DataFrame:
         if self._weight_cache is not None:

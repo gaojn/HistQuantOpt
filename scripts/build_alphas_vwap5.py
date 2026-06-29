@@ -21,7 +21,7 @@
       alphas/_summary.csv —— 各因子的输入参数与实测 IC/ICIR/自相关/换手
 
 运行：
-    cd /Users/guoguo/Desktop/HistQuantOpt
+    cd /Users/guoguo/Documents/HistQuantOpt
     python scripts/build_alphas_vwap5.py
 """
 
@@ -130,4 +130,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

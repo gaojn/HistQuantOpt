@@ -64,6 +64,42 @@ def _annual_metrics(ret: pd.Series, bm: pd.Series) -> dict:
     }
 
 
+def _turnover_summary(result: BacktestResult) -> dict[str, float]:
+    """汇总换手指标：年化双边换手、平均单期换手、年均调仓次数。"""
+    to = result.turnover.dropna()
+    n_years = len(result.daily_ret) / 252 if len(result.daily_ret) > 0 else 1.0
+    if len(to) == 0 or n_years <= 0:
+        return {
+            "annualized_turnover": 0.0,
+            "avg_turnover": 0.0,
+            "rebalances_per_year": 0.0,
+            "rebalances": 0.0,
+        }
+    return {
+        "annualized_turnover": float(to.sum() / n_years),
+        "avg_turnover": float(to.mean()),
+        "rebalances_per_year": float(len(to) / n_years),
+        "rebalances": float(len(to)),
+    }
+
+
+def _yearly_turnover_table(result: BacktestResult) -> pd.DataFrame:
+    """按自然年汇总双边换手率与调仓次数。"""
+    to = result.turnover.dropna()
+    if len(to) == 0:
+        return pd.DataFrame(columns=["rebalance_count", "turnover", "avg_turnover"])
+
+    yearly = pd.DataFrame({"turnover": to})
+    yearly["year"] = yearly.index.year
+    out = yearly.groupby("year").agg(
+        rebalance_count=("turnover", "size"),
+        turnover=("turnover", "sum"),
+        avg_turnover=("turnover", "mean"),
+    )
+    out.index.name = "year"
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────
 # 图表生成
 # ─────────────────────────────────────────────────────────────────
@@ -182,6 +218,27 @@ def _make_turnover_chart(result: BacktestResult) -> str:
     return fig.to_html(include_plotlyjs=False, full_html=False, div_id="turnover-chart")
 
 
+def _build_turnover_card(result: BacktestResult) -> str:
+    s = _turnover_summary(result)
+
+    def card(title: str, value: str, sub: str) -> str:
+        return (
+            '<div class="metric-card" style="border-left-color:#5dade2">'
+            f'<div class="metric-title">{title}</div>'
+            f'<div class="metric-value">{value}</div>'
+            f'<div class="metric-sub">{sub}</div>'
+            '</div>'
+        )
+
+    return (
+        '<div class="metric-grid" style="grid-template-columns:repeat(3,1fr)">'
+        + card("年化双边换手率", f"{s['annualized_turnover']*100:.1f}%", "按全期平均年度累计")
+        + card("平均单期双边换手", f"{s['avg_turnover']*100:.1f}%", "按实际调仓期平均")
+        + card("年均调仓次数", f"{s['rebalances_per_year']:.1f}", f"全期共 {int(s['rebalances'])} 次")
+        + '</div>'
+    )
+
+
 # ─────────────────────────────────────────────────────────────────
 # 统计表
 # ─────────────────────────────────────────────────────────────────
@@ -242,12 +299,14 @@ def _build_yearly_table(result: BacktestResult) -> str:
       - 全期行：年化收益（标注 *），超额=年化超额
     """
     rows = []
+    yearly_turnover = _yearly_turnover_table(result)
     for year, grp in result.daily_ret.groupby(result.daily_ret.index.year):
         bm_grp = result.bm_ret.reindex(grp.index).fillna(0)
         m = _annual_metrics(grp, bm_grp)
         port_total = (1 + grp).prod() - 1
         bm_total   = (1 + bm_grp).prod() - 1
         excess_geo = (1 + port_total) / (1 + bm_total) - 1 if (1 + bm_total) > 1e-8 else 0.0
+        yto = yearly_turnover.loc[year] if year in yearly_turnover.index else None
         rows.append({
             "年份":      f"{year}<span style='color:#95a5a6;font-size:10px'> ({len(grp)}天)</span>",
             "组合收益":  port_total,
@@ -258,11 +317,14 @@ def _build_yearly_table(result: BacktestResult) -> str:
             "Sharpe":   m["sharpe"],
             "Calmar":   m["calmar"],
             "信息比率":  m["info_ratio"],
+            "调仓次数":  int(yto["rebalance_count"]) if yto is not None else 0,
+            "双边换手":  float(yto["turnover"]) if yto is not None else 0.0,
             "超额TE":    m["excess_vol"],
             "超额回撤":  m["excess_max_dd"],
         })
 
     # 总体行（年化口径）
+    tsum = _turnover_summary(result)
     rows.append({
         "年份":      "<b>全期(年化*)</b>",
         "组合收益":  result.portfolio_metrics.annual_return,
@@ -273,6 +335,8 @@ def _build_yearly_table(result: BacktestResult) -> str:
         "Sharpe":   result.portfolio_metrics.sharpe,
         "Calmar":   result.portfolio_metrics.calmar,
         "信息比率":  result.portfolio_metrics.info_ratio,
+        "调仓次数":  f"{tsum['rebalances_per_year']:.1f}",
+        "双边换手":  tsum["annualized_turnover"],
         "超额TE":    result.portfolio_metrics.tracking_error,
         "超额回撤":  result.portfolio_metrics.excess_max_drawdown,
     })
@@ -282,7 +346,7 @@ def _build_yearly_table(result: BacktestResult) -> str:
         <thead><tr>
             <th>年份</th><th>组合收益</th><th>基准收益</th><th>超额收益</th>
             <th>波动率</th><th>Sharpe</th><th>Calmar</th>
-            <th>IR</th><th>跟踪误差</th><th>最大回撤</th><th>超额回撤</th>
+            <th>IR</th><th>调仓次数</th><th>双边换手</th><th>跟踪误差</th><th>最大回撤</th><th>超额回撤</th>
         </tr></thead><tbody>
     """
 
@@ -306,6 +370,8 @@ def _build_yearly_table(result: BacktestResult) -> str:
             <td>{r['Sharpe']:.2f}</td>
             <td>{r['Calmar']:.2f}</td>
             <td class="{color(r['信息比率'])}">{r['信息比率']:.2f}</td>
+            <td>{r['调仓次数']}</td>
+            <td>{fmt_pct(r['双边换手'])}</td>
             <td>{fmt_pct(r['超额TE'])}</td>
             <td class="{color(r['最大回撤'])}">{fmt_pct(r['最大回撤'])}</td>
             <td class="{color(r['超额回撤'])}">{fmt_pct(r['超额回撤'])}</td>
@@ -477,15 +543,20 @@ def _save_report_data(result: BacktestResult, output_path: Path) -> Path:
     metrics.to_parquet(base / "metrics.parquet")
 
     # 年度分解
+    yearly_turnover = _yearly_turnover_table(result)
     yrows = []
     for year, grp in result.daily_ret.groupby(result.daily_ret.index.year):
         bm_grp = result.bm_ret.reindex(grp.index).fillna(0)
         m = _annual_metrics(grp, bm_grp)
         port_total = (1 + grp).prod() - 1
         bm_total   = (1 + bm_grp).prod() - 1
+        yto = yearly_turnover.loc[year] if year in yearly_turnover.index else None
         yrows.append({
             "year":      int(year),
             "n_days":    len(grp),
+            "rebalance_count": int(yto["rebalance_count"]) if yto is not None else 0,
+            "turnover":  float(yto["turnover"]) if yto is not None else 0.0,
+            "avg_turnover": float(yto["avg_turnover"]) if yto is not None else 0.0,
             "port_ret":  port_total,
             "bm_ret":    bm_total,
             "excess_ret": (1 + port_total) / (1 + bm_total) - 1 if (1 + bm_total) > 1e-8 else 0.0,
@@ -620,6 +691,7 @@ def generate_html_report(
     nav_chart       = _make_nav_chart(result)
     monthly_table   = _build_monthly_excess_table(result)
     turnover_chart  = _make_turnover_chart(result)
+    turnover_card   = _build_turnover_card(result)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -655,6 +727,7 @@ def generate_html_report(
 
     <div class="section">
       <h2>调仓换手</h2>
+      {turnover_card}
       {turnover_chart}
     </div>
   </div>

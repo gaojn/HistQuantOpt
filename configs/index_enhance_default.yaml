@@ -1,0 +1,56 @@
+# ============================================================================
+# 指数增强（index_enhance）默认配置
+#   默认中证1000增强，所有约束相对基准。run_index_enhance_demo.py 跑此档。
+#   参数依据见 docs/method.md（§4 默认参数、§5 风格约束建议）。
+#   基准权重默认用官方成分权重（缺则 free_mv 重构），见操作指南数据准备。
+# ============================================================================
+strategy: index_enhance
+index: zz1000             # 基准指数：中证1000（可切 hs300 / zz500）
+
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2026-05-31"
+  rebalance_freq: 10        # 每 10 个交易日换仓一次
+  initial_value: 100000000  # 初始资金 1 亿元
+
+universe:
+  exclude_bj: true          # 剔除北交所
+  exclude_st: true          # 剔除 ST/*ST
+  top_n: null               # 候选池为 HS300+ZZ500+ZZ1000，不再截断
+
+optimizer:
+  weight_upper: 0.015           # 单票绝对上限 1.5%
+  min_constituent_ratio: 0.80   # 目标指数成分股下限 80%（保证「仍是指数增强」）
+  industry_active_bound: 0.05   # 行业相对基准偏离上限 ±5%
+  # 风格主动暴露上限（CNE6 16 风格，单位 σ，相对基准）：关键因子收紧防风格漂移
+  style_active_bound:
+    default: 0.60               # 未列出因子的兜底
+    Size: 0.25                  # 市值
+    Beta: 0.25                  # 市场暴露
+    Momentum: 0.20              # 动量：指增最易漂移，收最紧
+    Liquidity: 0.25             # 流动性
+    ResidualVolatility: 0.25    # 残差波动
+    Value: 0.50                 # 价值
+    Growth: 0.50                # 成长
+    EarningsYield: 0.50         # 盈利收益
+    Profitability: 0.50         # 盈利能力
+  tracking_penalty: 10.0        # L2 偏离基准惩罚 γ（未启用 risk_aversion 时才生效）
+  risk_aversion: 10.0           # CNE6 因子协方差进目标（真跟踪误差）；置空则退回 tracking_penalty
+  max_turnover: 0.30            # 双边换手硬上限 30%（≈单边 15%）
+  turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
+  weight_diff_l2_bound: null    # 可选：‖w-w_bm‖₂ 硬约束上限，null=不约束
+  # benchmark_weight_source: official  # 基准权重来源：official(默认,官方权重) / reconstruct(纯 free_mv 重构)
+  # cne6_data_dir: data/barra_cne6_L   # 可选：改用长周期 CNE6L 面板（默认短周期 S）
+
+alpha:
+  source: file
+  # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
+  path: "alphas/alpha_vwap5_ic0.12_icir1.2_decay0.80.parquet"
+
+execution:
+  cost_buy: 0.001           # 买入费率 1‰
+  cost_sell: 0.002          # 卖出费率 2‰（非对称）
+  risk_free: 0.02           # 年化无风险利率（Sharpe 用）
+
+output:
+  weights: "output/index_enhance_default/weights.parquet"

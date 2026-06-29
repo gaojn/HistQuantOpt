@@ -35,6 +35,30 @@ from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
 if TYPE_CHECKING:
     from portfolio_optimizer.risk.cne6_risk import RiskSnapshot
 
+_UNBOUNDED = 1e6
+
+
+def _resolve_style_bounds(
+    bound: "float | dict[str, float]", factor_names: "pd.Index | list[str]"
+) -> np.ndarray:
+    """把 style_bound（float 或 dict）展开成与因子列对齐的 K 维上限向量。"""
+    if isinstance(bound, dict):
+        default = bound.get("default", _UNBOUNDED)
+        return np.array([float(bound.get(f, default)) for f in factor_names], dtype=float)
+    return np.full(len(factor_names), float(bound), dtype=float)
+
+
+def _industry_group_matrix(ind_values: np.ndarray, n: int) -> np.ndarray:
+    """构造行业分组矩阵 G (K×n)，G[k,i]=1 表示股票 i 属于第 k 个行业。
+
+    用 G @ w 一次性表达全部行业权重和，替代逐行业 append 的标量约束。
+    """
+    uniq = pd.unique(ind_values)
+    G = np.zeros((len(uniq), n), dtype=float)
+    for k, name in enumerate(uniq):
+        G[k, ind_values == name] = 1.0
+    return G
+
 
 @dataclass
 class AlphaMaxConfig:
@@ -56,9 +80,12 @@ class AlphaMaxConfig:
             0.01 ~ 0.05  轻度分散，持仓 50-100 只
             0.05 ~ 0.20  中度分散，持仓 100-200 只
             > 0.20       接近等权，持仓 200+ 只
-    style_bound : float | None
+    style_bound : float | dict[str, float] | None
         风格因子绝对暴露上限，None 表示不约束，默认 1.0
-        即 |B_style[:,k]' w| <= style_bound  对所有风格因子 k
+        - float：所有风格因子统一上限（如 1.0 → 每个因子 ±1σ）
+        - dict：按因子名分别约束，可含 "default" 键作为未列出因子的兜底，
+          例：{"default": 0.8, "Size": 0.3, "Beta": 0.25}
+          （未列出且无 default 时该因子不约束）
     max_turnover : float | None
         双边换手率硬上限（0~2），None 表示不约束，默认 None
         例：0.5 表示单期最多换 50% 仓位
@@ -81,7 +108,7 @@ class AlphaMaxConfig:
     industry_upper: float = 0.20
     min_constituent_ratio: float = 0.0
     diversification_penalty: float = 0.05
-    style_bound: float | None = 1.0
+    style_bound: float | dict[str, float] | None = 1.0
     max_turnover: float | None = None
     turnover_penalty: float = 0.0
     risk_aversion: float | None = None
@@ -143,8 +170,10 @@ class AlphaMaxOptimizer:
 
         alpha = np.array(alpha, dtype=float)
 
-        # 禁止持仓的股票：停牌 / ST / 次新
-        banned_status = {TradingStatus.SUSPENDED, TradingStatus.NEW_LISTING}
+        # 禁止持仓的股票：停牌 / 次新 / ST
+        banned_status = {
+            TradingStatus.SUSPENDED, TradingStatus.NEW_LISTING, TradingStatus.ST,
+        }
         banned_mask = np.array(
             [s in banned_status for s in snapshot.status.values], dtype=bool
         )
@@ -164,25 +193,25 @@ class AlphaMaxOptimizer:
         # ---- 2. 个股上限 ----
         constraints.append(w <= cfg.weight_upper)
 
-        # ---- 3. 禁止持仓 ----
+        # ---- 3. 禁止持仓（向量化：一条等式覆盖全部禁持仓票）----
         banned_idx = np.where(banned_mask)[0]
-        for i in banned_idx:
-            constraints.append(w[i] == 0.0)
+        if len(banned_idx) > 0:
+            constraints.append(w[banned_idx] == 0.0)
 
-        # ---- 3b. 涨跌停约束（依赖上期权重）----
+        # ---- 3b. 涨跌停约束（依赖上期权重，向量化）----
         if prev_weight is not None:
             w_prev_arr = np.array(prev_weight, dtype=float)
-            for i in np.where(lup_mask)[0]:
-                constraints.append(w[i] <= float(w_prev_arr[i]))   # 涨停：不可加仓
-            for i in np.where(ldn_mask)[0]:
-                constraints.append(w[i] >= float(w_prev_arr[i]))   # 跌停：不可减仓
+            lup_idx = np.where(lup_mask)[0]
+            ldn_idx = np.where(ldn_mask)[0]
+            if len(lup_idx) > 0:
+                constraints.append(w[lup_idx] <= w_prev_arr[lup_idx])   # 涨停：不可加仓
+            if len(ldn_idx) > 0:
+                constraints.append(w[ldn_idx] >= w_prev_arr[ldn_idx])   # 跌停：不可减仓
 
-        # ---- 4. 行业绝对权重上限 ----
+        # ---- 4. 行业绝对权重上限（向量化：G @ w <= 上限）----
         industries = snapshot.industry.reindex(tickers).fillna("未知")
-        for ind_name in industries.unique():
-            idx = np.where(industries.values == ind_name)[0]
-            if len(idx) > 0:
-                constraints.append(cp.sum(w[idx]) <= cfg.industry_upper)
+        G_ind = _industry_group_matrix(industries.values, n)
+        constraints.append(G_ind @ w <= cfg.industry_upper)
 
         # ---- 5. 成分股权重下限（可选）----
         if (
@@ -200,8 +229,9 @@ class AlphaMaxOptimizer:
             B = style_loading.reindex(tickers).fillna(0.0).values  # (N, K)
             # |B[:,k]' w| <= style_bound  逐因子
             exposure = B.T @ w   # (K,)
-            constraints.append(exposure <= cfg.style_bound)
-            constraints.append(exposure >= -cfg.style_bound)
+            bound_vec = _resolve_style_bounds(cfg.style_bound, style_loading.columns)
+            constraints.append(exposure <= bound_vec)
+            constraints.append(exposure >= -bound_vec)
 
         # ---- 7. 换手约束与惩罚 ----
         turnover_penalty_term = 0.0

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from portfolio_optimizer.data.generator import MarketDataGenerator
+from portfolio_optimizer.data.generator import MarketDataGenerator, TradingStatus
 from portfolio_optimizer.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from portfolio_optimizer.optimizer.index_enhance import (
     IndexEnhanceConfig,
@@ -28,7 +28,11 @@ def _style(snap):
 
 def test_alpha_max_invariants(snap):
     alpha = np.random.default_rng(1).standard_normal(len(snap.tickers))
-    cfg = AlphaMaxConfig(weight_upper=0.05, industry_upper=0.5, style_bound=1.0)
+    cfg = AlphaMaxConfig(
+        weight_upper=0.05,
+        industry_upper=0.5,
+        style_bound={"default": 1.0, "Size": 0.4},
+    )
     res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, style_loading=_style(snap))
     assert res.is_feasible
     w = res.weights
@@ -38,6 +42,34 @@ def test_alpha_max_invariants(snap):
     # 停牌 / 次新权重必须为 0
     assert float(w[snap.suspended_mask].max(initial=0.0)) < 1e-6
     assert float(w[snap.new_listing_mask].max(initial=0.0)) < 1e-6
+
+
+def test_st_stocks_banned(snap):
+    """ST 票（独立状态）应被禁持仓，权重为 0，且 st_mask 正确反映。"""
+    snap.status.iloc[:3] = TradingStatus.ST
+    assert snap.st_mask[:3].all()
+    assert not snap.tradable_mask[:3].any()
+
+    alpha = np.random.default_rng(5).standard_normal(len(snap.tickers))
+    cfg = AlphaMaxConfig(weight_upper=0.05, industry_upper=0.5)
+    res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, style_loading=_style(snap))
+    assert res.is_feasible
+    assert float(res.weights[snap.st_mask].max(initial=0.0)) < 1e-6
+
+
+def test_alpha_max_per_factor_style_bound(snap):
+    """收紧某因子上限后，该因子的绝对暴露应被约束住。"""
+    alpha = np.random.default_rng(11).standard_normal(len(snap.tickers))
+    style = _style(snap)
+    cfg = AlphaMaxConfig(
+        weight_upper=0.1,
+        industry_upper=0.6,
+        style_bound={"default": 5.0, "Size": 0.05},
+    )
+    res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, style_loading=style)
+    assert res.is_feasible
+    size_exp = float(style["Size"].values @ res.weights)
+    assert abs(size_exp) <= 0.05 + 1e-4
 
 
 def test_index_enhance_invariants(snap):

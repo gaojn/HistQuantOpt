@@ -123,7 +123,7 @@ $$\|w - w_0\|_1 \leq T_{\max}$$
 portfolio_optimizer/
 ├── data/
 │   ├── real_adapter.py     # parquet 面板 → MarketSnapshot
-│   ├── benchmark.py        # 分级靠档指数成分权重
+│   ├── benchmark.py        # 指数成分权重（默认官方权重，缺则分级靠档重构）
 │   ├── index_close.py      # 官方指数收盘价加载（回测基准）
 │   ├── clickhouse_db.py    # ClickHouse 只读连接层
 │   └── generator.py        # 合成数据/快照构件

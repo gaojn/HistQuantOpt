@@ -20,11 +20,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 import polars as pl
 from scipy.stats import spearmanr
+
+logger = logging.getLogger(__name__)
 
 # 默认网格（精简两轴）
 DEFAULT_IC_LIST   = [0.02, 0.03, 0.05, 0.08, 0.10, 0.12]
@@ -282,7 +285,7 @@ def run_grid(
             res["sweep"] = "ic_icir"
             rows.append(res)
             if verbose:
-                print(f"  [A {i:2d}/{n_a}] IC={ic:.2f} ICIR={icir:.1f} "
+                logger.info(f"  [A {i:2d}/{n_a}] IC={ic:.2f} ICIR={icir:.1f} "
                       f"→ 实测IC={res['ic']:.4f} ICIR={res['icir']:.2f} "
                       f"LS_IR={res['ls_ir']:.2f}")
 
@@ -292,7 +295,7 @@ def run_grid(
         res["sweep"] = "decay"
         rows.append(res)
         if verbose:
-            print(f"  [B {j:2d}/{len(decay_list)}] decay={dc:.2f} "
+            logger.info(f"  [B {j:2d}/{len(decay_list)}] decay={dc:.2f} "
                   f"→ 实测IC={res['ic']:.4f} ICIR={res['icir']:.2f} "
                   f"LS_IR={res['ls_ir']:.2f} 自相关={res['autocorr']:.2f} "
                   f"换手={res['turnover']:.2f}")

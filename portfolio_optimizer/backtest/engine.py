@@ -17,6 +17,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from portfolio_optimizer.constants import LIMIT_TOL
+
 
 @dataclass
 class PerformanceMetrics:
@@ -199,7 +201,11 @@ class RealisticBacktester:
         def align(df: pd.DataFrame) -> pd.DataFrame:
             return df.reindex(index=all_dates)
 
-        ac   = align(adj_close)
+        ac_raw = align(adj_close)        # 当日真实收盘价（退市/缺行为 NaN）
+        # 估值用「最后有效价」：退市或数据缺失时，持仓按上一有效价计入 NAV，
+        # 避免持仓凭空归零再于复牌/补数时跳回，造成净值假摔。
+        # 注意：仅估值 ffill，成交价 av 不 ffill（退市后不可假装能成交）。
+        ac   = ac_raw.ffill()
         av   = align(adj_vwap)
         cr   = align(close_raw)
         lu   = align(limit_up_df)
@@ -208,8 +214,8 @@ class RealisticBacktester:
 
         # 涨跌停和停牌布尔矩阵（ticker 轴对齐到 adj_close 的 columns）
         common = adj_close.columns
-        is_lup = (cr.reindex(columns=common) >= lu.reindex(columns=common) * 0.999).fillna(False)
-        is_ldn = (cr.reindex(columns=common) <= ld.reindex(columns=common) * 1.001).fillna(False)
+        is_lup = (cr.reindex(columns=common) >= lu.reindex(columns=common) * (1 - LIMIT_TOL)).fillna(False)
+        is_ldn = (cr.reindex(columns=common) <= ld.reindex(columns=common) * (1 + LIMIT_TOL)).fillna(False)
         is_sus = (ts.reindex(columns=common) == "停牌").fillna(False)
 
         # ── 状态 ─────────────────────────────────────────────────
@@ -384,6 +390,22 @@ class RealisticBacktester:
 
         turnover_s = pd.Series(turnover_rec, name="turnover")
 
+        # 退市/长停滞留告警：回测末日仍持有、但当日无真实价（靠 ffill 陈旧价估值）
+        # 的持仓 —— 这些票实际已无法成交（退市或长期停牌），其估值不可全信。
+        last_date    = all_dates[-1]
+        ac_raw_last  = ac_raw.loc[last_date]
+        ac_last      = ac.loc[last_date]
+        stuck_cnt    = 0
+        stuck_val    = 0.0
+        for t, sh in shares.items():
+            if sh <= 1e-10:
+                continue
+            if pd.isna(ac_raw_last.get(t)) and pd.notna(ac_last.get(t)):
+                stuck_cnt += 1
+                stuck_val += sh * float(ac_last.get(t))
+        final_nav = float(port_values[last_date])
+        stale_value_pct = stuck_val / final_nav if final_nav > 1e-8 else 0.0
+
         pm = calc_metrics(port_ret, bm_ret, self.risk_free)
         bm = calc_metrics(bm_ret, pd.Series(0.0, index=bm_ret.index), self.risk_free)
 
@@ -400,9 +422,11 @@ class RealisticBacktester:
         )
 
         exec_stats = {
-            "buy_fail_count":   buy_fail_cnt,
-            "sell_defer_count": sell_defer_cnt,
-            "avg_cash_pct":     float(np.mean(cash_ratio_rec)) if cash_ratio_rec else 0.0,
+            "buy_fail_count":     buy_fail_cnt,
+            "sell_defer_count":   sell_defer_cnt,
+            "avg_cash_pct":       float(np.mean(cash_ratio_rec)) if cash_ratio_rec else 0.0,
+            "delisted_stuck_count": stuck_cnt,        # 末日靠陈旧价估值的滞留持仓数
+            "stale_value_pct":    float(stale_value_pct),  # 其价值占末日 NAV 比例
         }
 
         return result, exec_stats

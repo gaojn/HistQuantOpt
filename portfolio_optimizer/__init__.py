@@ -13,10 +13,11 @@ A股量化多头组合优化框架。
 详见 docs/操作指南.md。
 """
 
+import logging
+
 from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
 from portfolio_optimizer.data.real_adapter import RealMarketAdapter
 from portfolio_optimizer.data.benchmark import IndexBenchmarkWeights
-from portfolio_optimizer.factors.alpha_factors import AlphaFactors
 from portfolio_optimizer.risk import CNE6RiskModel
 from portfolio_optimizer.optimizer.alpha_max import (
     AlphaMaxConfig,
@@ -33,12 +34,16 @@ from portfolio_optimizer.backtest.engine import BacktestResult, RealisticBacktes
 # Backtester 是旧公开 API 名称；真实执行回测已统一融合到 engine.py。
 Backtester = RealisticBacktester
 
+# 库惯例：默认挂 NullHandler，不强加日志配置；由调用方（脚本/应用）
+# 通过 logging.basicConfig 决定输出与级别。
+logging.getLogger(__name__).addHandler(logging.NullHandler())
+
 __all__ = [
     # 数据
     "MarketSnapshot", "TradingStatus",
     "RealMarketAdapter", "IndexBenchmarkWeights",
-    # 因子 / 风险
-    "AlphaFactors", "CNE6RiskModel",
+    # 风险
+    "CNE6RiskModel",
     # 优化
     "AlphaMaxConfig", "AlphaMaxOptimizer", "AlphaMaxResult",
     "IndexEnhanceConfig", "IndexEnhanceOptimizer", "IndexEnhanceResult",

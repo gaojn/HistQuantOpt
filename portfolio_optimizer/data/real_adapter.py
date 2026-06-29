@@ -19,11 +19,9 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
+from portfolio_optimizer.constants import LIMIT_TOL
 from portfolio_optimizer.io.data_panel import load_panel
 from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
-
-# 涨跌停判断容差：close 与 limit 价之差在此比例内视为封板
-_LIMIT_TOL = 5e-4   # 0.05%，处理浮点误差
 
 
 class RealMarketAdapter:
@@ -276,7 +274,7 @@ class RealMarketAdapter:
         hit_up = (
             (ts == "交易") &
             (limit_up > 0) &
-            (np.abs(close - limit_up) / np.where(limit_up > 0, limit_up, 1) < _LIMIT_TOL)
+            (np.abs(close - limit_up) / np.where(limit_up > 0, limit_up, 1) < LIMIT_TOL)
         )
         status[hit_up] = TradingStatus.LIMIT_UP
 
@@ -284,7 +282,7 @@ class RealMarketAdapter:
         hit_down = (
             (ts == "交易") &
             (limit_down > 0) &
-            (np.abs(close - limit_down) / np.where(limit_down > 0, limit_down, 1) < _LIMIT_TOL)
+            (np.abs(close - limit_down) / np.where(limit_down > 0, limit_down, 1) < LIMIT_TOL)
         )
         status[hit_down] = TradingStatus.LIMIT_DOWN
 
@@ -294,8 +292,8 @@ class RealMarketAdapter:
         # 4. 次新股（上市不足 new_listing_days 个自然日）
         status[list_days < self.new_listing_days] = TradingStatus.NEW_LISTING
 
-        # 5. ST / *ST（禁止持仓，与次新同等处理）
-        status[is_st] = TradingStatus.NEW_LISTING
+        # 5. ST / *ST（禁止持仓，独立状态）
+        status[is_st] = TradingStatus.ST
 
         return pd.Series(status, index=idx, name="status")
 
@@ -307,7 +305,8 @@ class RealMarketAdapter:
     ) -> pd.Series:
         """默认上期持仓：指数成分股等权，非成分股权重为 0。"""
         w = pd.Series(0.0, index=tickers, name="prev_weight")
-        eligible = is_constituent & (status != TradingStatus.NEW_LISTING)
+        banned = {TradingStatus.NEW_LISTING, TradingStatus.ST, TradingStatus.SUSPENDED}
+        eligible = is_constituent & ~status.isin(banned)
         n_eligible = eligible.sum()
         if n_eligible > 0:
             w[eligible] = 1.0 / n_eligible

@@ -30,7 +30,7 @@ import pandas as pd
 import polars as pl
 
 from portfolio_optimizer.io.data_panel import load_panel
-from scripts.run_backtest import run_backtest
+from portfolio_optimizer.backtest.run import run_backtest
 
 # ── 路径配置 ──────────────────────────────────────────────────────
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent

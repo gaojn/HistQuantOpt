@@ -25,6 +25,7 @@ class TradingStatus(Enum):
     LIMIT_UP = "limit_up"       # 涨停（不可买入）
     LIMIT_DOWN = "limit_down"   # 跌停（不可卖出）
     NEW_LISTING = "new_listing" # 上市首日 / 次新（禁止持仓）
+    ST = "st"                   # ST / *ST（禁止持仓）
 
 
 # CITIC 一级行业（简化为 30 个）
@@ -74,9 +75,13 @@ class MarketSnapshot:
         return (self.status == TradingStatus.NEW_LISTING).values
 
     @property
+    def st_mask(self) -> np.ndarray:
+        return (self.status == TradingStatus.ST).values
+
+    @property
     def tradable_mask(self) -> np.ndarray:
-        """可正常参与优化的股票（排除停牌和上市首日）。"""
-        return ~(self.suspended_mask | self.new_listing_mask)
+        """可正常参与优化的股票（排除停牌、上市首日、ST）。"""
+        return ~(self.suspended_mask | self.new_listing_mask | self.st_mask)
 
     @property
     def constituent_mask(self) -> np.ndarray:
