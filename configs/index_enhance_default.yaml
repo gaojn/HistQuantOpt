@@ -19,7 +19,7 @@ universe:
   top_n: null               # 候选池为 HS300+ZZ500+ZZ1000，不再截断
 
 optimizer:
-  weight_upper: 0.010           # 单票绝对上限 1.5%
+  weight_upper: 0.010           # 单票绝对上限 1.0%
   min_constituent_ratio: 0.80   # 目标指数成分股下限 80%（保证「仍是指数增强」）
   industry_active_bound: 0.05   # 行业相对基准偏离上限 ±5%
   # 风格主动暴露上限（CNE6 16 风格，单位 σ，相对基准）：关键因子收紧防风格漂移
@@ -36,7 +36,7 @@ optimizer:
     Profitability: 0.50         # 盈利能力
   tracking_penalty: 10.0        # L2 偏离基准惩罚 γ（未启用 risk_aversion 时才生效）
   risk_aversion: 10.0           # CNE6 因子协方差进目标（真跟踪误差）；置空则退回 tracking_penalty
-  max_turnover: 0.40            # 双边换手硬上限 30%（≈单边 15%）
+  max_turnover: 0.40            # 双边换手硬上限 40%（≈单边 20%）
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
   active_weight_upper: 0.01     # 单票主动偏离上限 |w_i-w_bm_i| ≤ δ，null=不约束；典型值 0.01~0.03
   weight_diff_l2_bound: null    # 可选：‖w-w_bm‖₂ 硬约束上限，null=不约束
@@ -46,7 +46,7 @@ optimizer:
 alpha:
   source: file
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
-  path: "alphas/alpha_vwap5_ic0.12_icir1.2_decay0.80.parquet"
+  path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
 
 execution:
   cost_buy: 0.001           # 买入费率 1‰

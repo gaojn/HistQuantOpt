@@ -98,17 +98,17 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 
 | 参数 | 量化多头 | 指数增强 | 含义 |
 |---|---:|---:|---|
-| `weight_upper` | 0.02 | 0.015 | 指增更贴基准，单票更收敛 |
+| `weight_upper` | 0.01 | 0.01 | 单票绝对上限，两策略目前一致 |
 | `active_weight_upper` | — | 0.01 | 指增专属：单票主动偏离硬上限 ±1%，`null`=不约束 |
 | `min_constituent_ratio` | 0.40 | 0.80 | 指增须大部分留在目标指数内 |
 | 行业 | `industry_upper: 0.20` | `industry_active_bound: 0.05` | 绝对集中度 vs 相对偏离 |
-| 风格默认上限 | `style_bound.default: 0.80` | `style_active_bound.default: 0.60` | 指增更怕风格漂移 |
-| `Size` / `Beta` | 0.30 / 0.25 | 0.25 / 0.25 | 控市值、市场暴露 |
-| `Momentum` | 0.50 | 0.20 | 指增显著更严，防动量偏离 |
-| `Liquidity` / `ResidualVolatility` | 0.30 / 0.30 | 0.25 / 0.25 | 控流动性、高波动偏离 |
-| `risk_aversion` | 8.0 | 10.0 | CNE6 风险项强度 |
+| 风格默认上限 | `style_bound.default: 0.50` | `style_active_bound.default: 0.60` | 指增更怕风格漂移 |
+| `Size` / `Beta` | 0.20 / 0.20 | 0.20 / 0.20 | 控市值、市场暴露 |
+| `Momentum` | 0.30 | 0.20 | 指增显著更严，防动量偏离 |
+| `Liquidity` / `ResidualVolatility` | 0.20 / 0.20 | 0.20 / 0.25 | 控流动性、高波动偏离 |
+| `risk_aversion` | `null` | 10.0 | CNE6 风险项强度（量化多头默认关闭，退回 L2） |
 | 风险代理 | `diversification_penalty: 0.05` | `tracking_penalty: 10.0` | 控集中度 vs 控偏离基准 |
-| `max_turnover` / `turnover_penalty` | 0.30 / 0.01 | 0.30 / 0.01 | 一致 |
+| `max_turnover` / `turnover_penalty` | 0.40 / 0.01 | 0.40 / 0.01 | 一致 |
 
 **设计要点**：不照搬「全因子中性」。保留 alpha 表达空间，只压住最关键的公共风格风险，
 其余交给 `risk_aversion` 对应的风险项吸收。成分股下限让量化多头仍保留主流敞口
@@ -194,9 +194,9 @@ snap = RealMarketAdapter().build_snapshot_from_panel(
 )
 risk_snap = CNE6RiskModel().at(target, snap.tickers)      # None 则退回 L2 惩罚
 cfg = AlphaMaxConfig(
-    weight_upper=0.02, industry_upper=0.20, min_constituent_ratio=0.40,
-    style_bound={"default": 0.80, "Size": 0.30, "Beta": 0.25},
-    max_turnover=0.30, turnover_penalty=0.01, risk_aversion=8.0,
+    weight_upper=0.01, industry_upper=0.20, min_constituent_ratio=0.40,
+    style_bound={"default": 0.50, "Size": 0.20, "Beta": 0.20},
+    max_turnover=0.40, turnover_penalty=0.01, risk_aversion=None,
 )
 res = AlphaMaxOptimizer(cfg).optimize(
     alpha=alpha_vec, snapshot=snap,
@@ -220,9 +220,10 @@ bm.precompute(date(2026, 4, 1), target, panel=panel)
 bm_w = bm.get_weights(target, tickers=snap.tickers).values
 risk_snap = CNE6RiskModel().at(target, snap.tickers)
 cfg = IndexEnhanceConfig(
-    weight_upper=0.015, min_constituent_ratio=0.80, industry_active_bound=0.05,
-    style_active_bound={"default": 0.60, "Size": 0.25, "Momentum": 0.20},
-    tracking_penalty=10.0, max_turnover=0.30, risk_aversion=10.0,
+    weight_upper=0.01, min_constituent_ratio=0.80, industry_active_bound=0.05,
+    style_active_bound={"default": 0.60, "Size": 0.20, "Momentum": 0.20},
+    tracking_penalty=10.0, max_turnover=0.40, risk_aversion=10.0,
+    active_weight_upper=0.01,
 )
 res = IndexEnhanceOptimizer(cfg).optimize(
     alpha=alpha_vec, snapshot=snap, benchmark_weight=bm_w,

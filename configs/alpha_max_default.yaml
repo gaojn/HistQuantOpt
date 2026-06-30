@@ -18,12 +18,12 @@ universe:
   top_n: null               # 不按市值截断，全市场
 
 optimizer:
-  weight_upper: 0.02            # 单票绝对上限 2%
+  weight_upper: 0.01            # 单票绝对上限 1%
   industry_upper: 0.20          # 单行业绝对上限 20%
   min_constituent_ratio: 0.40   # 主流成分股下限 40%（保流动性/容量）
   diversification_penalty: 0.05 # L2 分散惩罚 γ（未启用 risk_aversion 时才生效）
-  risk_aversion: 0.0            # CNE6 因子协方差进目标（真风险项）；置空则退回上面的 L2 惩罚
-  max_turnover: 0.40            # 双边换手硬上限 30%（≈单边 15%）
+  risk_aversion: null           # CNE6 因子协方差进目标（真风险项）；置空则退回上面的 L2 惩罚
+  max_turnover: 0.40            # 双边换手硬上限 40%（≈单边 20%）
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
   # 风格绝对暴露上限（CNE6 16 风格，单位 σ）：只收紧关键公共风险，其余给 alpha 留表达空间
   style_bound:
@@ -40,7 +40,7 @@ optimizer:
 alpha:
   source: file
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
-  path: "alphas/alpha_vwap5_ic0.12_icir1.2_decay0.80.parquet"
+  path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
 
 execution:
   cost_buy: 0.001           # 买入费率 1‰
