@@ -169,6 +169,7 @@ def run_batch_optimize(
             tracking_penalty=float(opt_cfg["tracking_penalty"]),
             max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
             turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
+            active_weight_upper=float(opt_cfg["active_weight_upper"]) if opt_cfg.get("active_weight_upper") else None,
             weight_diff_l2_bound=float(opt_cfg["weight_diff_l2_bound"]) if opt_cfg.get("weight_diff_l2_bound") else None,
             risk_aversion=risk_aversion,
         )

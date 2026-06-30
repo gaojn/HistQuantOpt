@@ -22,19 +22,19 @@ optimizer:
   industry_upper: 0.20          # 单行业绝对上限 20%
   min_constituent_ratio: 0.40   # 主流成分股下限 40%（保流动性/容量）
   diversification_penalty: 0.05 # L2 分散惩罚 γ（未启用 risk_aversion 时才生效）
-  risk_aversion: 8.0            # CNE6 因子协方差进目标（真风险项）；置空则退回上面的 L2 惩罚
-  max_turnover: 0.30            # 双边换手硬上限 30%（≈单边 15%）
+  risk_aversion: 0.0            # CNE6 因子协方差进目标（真风险项）；置空则退回上面的 L2 惩罚
+  max_turnover: 0.40            # 双边换手硬上限 30%（≈单边 15%）
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
   # 风格绝对暴露上限（CNE6 16 风格，单位 σ）：只收紧关键公共风险，其余给 alpha 留表达空间
   style_bound:
-    default: 0.80               # 未列出因子的兜底
-    Size: 0.30                  # 市值：防小盘下沉
-    Beta: 0.25                  # 市场暴露
-    Liquidity: 0.30             # 流动性：防低流动性堆积
-    ResidualVolatility: 0.25    # 残差波动：防高波动堆积
-    Momentum: 0.50              # 动量：中等
-    Value: 0.60                 # 价值：偏宽（收益风格）
-    Growth: 0.60                # 成长：偏宽（收益风格）
+    default: 0.50               # 未列出因子的兜底
+    Size: 0.20                  # 市值：防小盘下沉
+    Beta: 0.20                  # 市场暴露
+    Liquidity: 0.20             # 流动性：防低流动性堆积
+    ResidualVolatility: 0.20    # 残差波动：防高波动堆积
+    Momentum: 0.30              # 动量：中等
+    Value: 0.50                 # 价值：偏宽（收益风格）
+    Growth: 0.50                # 成长：偏宽（收益风格）
   # cne6_data_dir: data/barra_cne6_L   # 可选：改用长周期 CNE6L 面板（默认短周期 S）
 
 alpha:

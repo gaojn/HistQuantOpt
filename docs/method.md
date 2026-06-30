@@ -63,6 +63,7 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 |---|---|---|---|
 | 1 | 预算 | $\sum w_i = 1$ | 同 |
 | 2 | 个股区间 | $0\le w_i\le W_{\max}$ | 同 |
+| 2b | 单票主动偏离（可选） | — | $\lvert w_i - w_{bm,i}\rvert \le \delta$ |
 | 3 | 成分股下限 | $\sum_{i\in C} w_i \ge R_{\min}$（可选） | $\sum_{i\in C_{\text{index}}} w_i \ge R_{\min}$ |
 | 4 | 行业 | $\sum_{i\in k} w_i \le I_{\max}$ | $\lvert\sum_{i\in k}(w_i-w_{bm,i})\rvert \le I_{\text{act}}$ |
 | 5 | 风格 | $\lvert B_k^\top w\rvert \le S_{\max,k}$ | $\lvert B_k^\top(w-w_{bm})\rvert \le S_{\text{act},k}$ |
@@ -98,6 +99,7 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 | 参数 | 量化多头 | 指数增强 | 含义 |
 |---|---:|---:|---|
 | `weight_upper` | 0.02 | 0.015 | 指增更贴基准，单票更收敛 |
+| `active_weight_upper` | — | 0.01 | 指增专属：单票主动偏离硬上限 ±1%，`null`=不约束 |
 | `min_constituent_ratio` | 0.40 | 0.80 | 指增须大部分留在目标指数内 |
 | 行业 | `industry_upper: 0.20` | `industry_active_bound: 0.05` | 绝对集中度 vs 相对偏离 |
 | 风格默认上限 | `style_bound.default: 0.80` | `style_active_bound.default: 0.60` | 指增更怕风格漂移 |

@@ -17,6 +17,7 @@
     sum(w[const])           ≥ R_min                      成分股下限（如 HS300 ≥ 80%）
     |Σ_{i∈ind_k}(w_i-w_bm_i)| ≤ I_active                行业主动偏离 (±5%)
     |B_style[:,k]'(w-w_bm)| ≤ S_active                  风格主动暴露 (±0.3σ)
+    |w_i − w_bm_i|          ≤ δ                          单票主动偏离上限（可选）
     ‖w − w_prev‖₁           ≤ T_max                     双边换手率硬上限（可选）
     w[停牌/ST/次新]          = 0                         交易状态
 
@@ -102,6 +103,9 @@ class IndexEnhanceConfig:
           λ·(active'XFX'active + δ'active²)，active=w−w_bm，
           刻画相对基准的真实主动风险（因子相关性 + 特质风险）
         与 turnover_penalty 正交：风险项控主动风险，成本项控换手。
+    active_weight_upper : float | None
+        单票主动偏离硬上限 |w_i - w_bm_i| ≤ δ，None=不约束（默认）。
+        典型值：0.01（±1%）～ 0.03（±3%）。
     """
     weight_upper: float = 0.05
     min_constituent_ratio: float = 0.80
@@ -111,6 +115,7 @@ class IndexEnhanceConfig:
     max_turnover: float | None = 0.20
     turnover_penalty: float = 0.0
     weight_diff_l2_bound: float | None = None   # ‖w-w_bm‖₂ 硬约束上限
+    active_weight_upper: float | None = None    # 单票主动偏离上限 |w_i - w_bm_i| ≤ δ
     risk_aversion: float | None = None
 
 
@@ -162,6 +167,12 @@ class IndexEnhanceOptimizer:
 
         # 2. 个股区间
         constraints.append(w <= cfg.weight_upper)
+
+        # 2b. 单票主动偏离上限 |w_i - w_bm_i| ≤ δ
+        if cfg.active_weight_upper is not None:
+            delta = cfg.active_weight_upper
+            constraints.append(w - w_bm <= delta)
+            constraints.append(w_bm - w <= delta)
 
         # 3. 禁止持仓（向量化）
         banned_idx = np.where(banned_mask)[0]
