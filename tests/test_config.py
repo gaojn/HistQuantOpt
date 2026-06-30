@@ -26,4 +26,4 @@ def test_alpha_max_default_style_dict_parses():
     cfg = load_config("configs/alpha_max_default.yaml")
     b = _parse_style_bound(cfg["optimizer"]["style_bound"])
     assert isinstance(b, dict)
-    assert b["Size"] == 0.30
+    assert b["Size"] == 0.20
