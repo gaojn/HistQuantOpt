@@ -4,7 +4,8 @@
     hqopt run <config>                          一站式：优化 → 回测 → HTML 报告
     hqopt optimize <config>                     逐期优化，输出权重矩阵
     hqopt backtest --weights ... --index ...    权重 → 回测 → HTML 报告
-    hqopt data sync|cne6|index-close|index-weight   数据准备（导出脚本透传）
+    hqopt attribute --weights ... --index ...   权重 → 收益归因（风格/行业/特质）
+    hqopt data sync|cne6|factor-return|index-close|index-weight   数据准备（导出脚本透传）
 
 安装后即可使用：`pip install -e .`，然后 `hqopt run configs/index_enhance_default.yaml`。
 """
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _DATA_SCRIPTS = {
     "sync": "sync_ashare_cache.py",          # A股行情缓存（the_quant）
     "cne6": "export_cne6_panels.py",         # CNE6 风险面板（the_quant）
+    "factor-return": "export_factor_attribution.py",  # 因子/特质收益（cne6_risk，收益归因用）
     "index-close": "export_index_close.py",  # 指数日收盘价（wind_db）
     "index-weight": "export_index_weight.py",# 指数官方成分权重（wind_db）
 }
@@ -85,6 +87,14 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_attribute(args: argparse.Namespace) -> None:
+    from portfolio_optimizer.analysis.run import run_attribution
+    run_attribution(
+        args.weights, args.start, args.end, index=args.index,
+        out_dir=args.out_dir, cne6_data_dir=args.cne6_data_dir,
+    )
+
+
 def cmd_data(what: str, extra: list[str]) -> None:
     """透传到 scripts/ 下的导出脚本（其余参数原样转交）。"""
     script = ROOT / "scripts" / _DATA_SCRIPTS[what]
@@ -121,6 +131,16 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--cost-sell", type=float, default=0.002)
     pb.add_argument("--initial-value", type=float, default=1e8)
     pb.set_defaults(func=cmd_backtest)
+
+    pa = sub.add_parser("attribute", help="权重→收益归因（风格/行业/Country/特质分解）")
+    pa.add_argument("--weights", required=True, help="权重 parquet（长表/宽表）")
+    pa.add_argument("--start", required=True, help="归因起始日 如 2020-01-01")
+    pa.add_argument("--end", required=True, help="归因截止日 如 2026-05-31")
+    pa.add_argument("--index", default="zz1000",
+                     help="基准：hs300/zz500/zz1000 用官方成分权重，其余（如 all/csiall）用全市场等权")
+    pa.add_argument("--out-dir", default=None, help="归因结果输出目录")
+    pa.add_argument("--cne6-data-dir", default=None, help="CNE6 风险面板目录，默认短周期 S")
+    pa.set_defaults(func=cmd_attribute)
 
     pdt = sub.add_parser("data", help="数据准备（透传到导出脚本）")
     pdt.add_argument("what", choices=list(_DATA_SCRIPTS), help="要导出的数据")

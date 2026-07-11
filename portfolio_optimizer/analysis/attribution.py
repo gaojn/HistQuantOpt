@@ -1,0 +1,270 @@
+"""收益归因：把每期主动收益拆成风格 / 行业 / Country / 个股特质贡献。
+
+用于回答"超额是真选股能力，还是优化器偷偷吃了风格 beta"——把超额收益
+用 CNE6 因子模型分解，而非只看一条净值曲线。
+
+方法
+----
+每个调仓期 ``[T_i, T_{i+1}]`` 内，主动权重与因子暴露沿用信号日 T_i 的
+as-of 值不变（与优化器决策时用的暴露一致）；持有区间为 ``(T_i, T_{i+1}]``
+——即信号日 T_i 当天仍按上一期权重计入收益，T_i 决定的新权重从 T_i+1 起
+才实际持有（对应 T+1 执行），与 :mod:`portfolio_optimizer.backtest.engine`
+的执行时序保持一致，避免"用当天新权重解释当天已发生收益"的时序错配。
+
+持有期内逐日用当日已实现的因子收益 f(t) 与个股特质收益 u(t) 计算贡献：
+
+    主动收益(t) ≈ Σ_k X_active_k · f_k(t)  +  Σ_i w_active_i · u_i(t)
+                  └──────── 风格 + 行业 + Country ────────┘   └── 选股 ──┘
+
+其中 X_active_k = Σ_i w_active_i · X_ik（该持有期内固定不变的主动暴露），
+f_k(t)/u_i(t) 来自 ClickHouse cne6_risk（与暴露 X 同源，见
+:mod:`portfolio_optimizer.risk.attribution_data`），保证暴露与收益出自
+同一套模型，残差自检才有意义。
+
+多期链接用 Carino (1999) 平滑系数，基于每日已实现的主动收益本身
+（而非分别对组合/基准收益取对数——本模块不强制要求单独的组合、基准
+收益序列），|a_t| ≪ 1（日频通常满足）时近似成立，保证 Σ 各归因项
+链接后的累计贡献 = 真实几何累计主动收益（"合计"行即为该恒等式的自检）。
+
+残差自检：每日 ``主动收益 - (风格+行业+Country+特质)`` 理论上应 ≈ 0
+（在暴露/收益对齐正确、且持仓票均在风险模型估计域内时，两者恒等）。
+
+已知局限——残差不会严格为 0：
+    1. **覆盖缺口**：cne6_risk 的暴露/特质收益只覆盖其估计域
+       （``univ_flag==1``，剔除次新/极小市值/长期停牌等）。组合或基准
+       里在估计域外的持仓，其真实收益仍计入"主动收益"，但因子/特质
+       两项均为 0（暴露和特质收益都取不到），全部漏进残差。
+       ``daily["coverage_pct"]`` 记录了每个持有期"被模型覆盖的主动
+       权重占比"，可用于判断该期归因是否可信；但覆盖率与残差占比
+       不是线性关系——未覆盖的通常正是次新/极小市值这类高波动票，
+       权重占比很小也可能贡献不成比例的收益/残差（实测覆盖率
+       中位数~97%，残差仍占主动收益~27%），不能只看覆盖率百分比
+       就假设残差很小。
+    2. **暴露按持有期冻结**：本模块暴露 X 只在信号日 T_i 取值一次、
+       整个持有期 ``(T_i, T_{i+1}]`` 内保持不变（与优化器约束假设一致），
+       而 f(t)/u(t) 出自模型逐日的截面回归（用当日暴露）。调仓越不频繁，
+       此近似误差可能越大。
+    实测（见 tests/test_attribution.py）：全覆盖的合成数据残差严格为 0，
+    证明分解算式本身正确；残差非零是数据覆盖问题，不是代码逻辑问题。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from portfolio_optimizer.risk.attribution_data import FactorReturnLoader
+from portfolio_optimizer.risk.cne6_risk import CNE6RiskModel, STYLE_FACTORS
+
+_TRADING_DAYS = 252
+_COUNTRY = "Country"
+
+
+def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+    return df.sort_index()
+
+
+def _align_union(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
+    idx = a.index.union(b.index)
+    return a.reindex(idx).fillna(0.0), b.reindex(idx).fillna(0.0)
+
+
+def _carino_k(r: float) -> float:
+    """Carino(1999) 对数平滑系数：ln(1+r)/r，r→0 时取极限 1。"""
+    if abs(r) < 1e-10:
+        return 1.0
+    return float(np.log1p(r) / r)
+
+
+def _carino_summary(items: dict[str, pd.Series], active_return: pd.Series) -> pd.DataFrame:
+    """多期 Carino 链接 + 简单 t 统计，汇总成归因表。"""
+    n = len(active_return)
+    r_geo = float((1 + active_return).prod() - 1)
+    k = _carino_k(r_geo)
+    k_t = active_return.apply(_carino_k)
+
+    rows = []
+    for name, s in items.items():
+        linked = float((s * k_t / k).sum())
+        annualized = linked * (_TRADING_DAYS / n)
+        pct = linked / r_geo * 100 if abs(r_geo) > 1e-12 else float("nan")
+        std = float(s.std(ddof=1))
+        t_stat = float(s.mean() / (std / np.sqrt(n))) if std > 1e-12 else float("nan")
+        ann_vol = std * np.sqrt(_TRADING_DAYS)
+        rows.append({
+            "归因项": name,
+            "累计贡献": linked,
+            "年化贡献": annualized,
+            "占主动收益%": pct,
+            "t统计": t_stat,
+            "年化波动": ann_vol,
+        })
+    return pd.DataFrame(rows).set_index("归因项")
+
+
+@dataclass
+class AttributionResult:
+    """归因结果。"""
+    factor_daily: pd.DataFrame   # index=date, columns=47 因子, 逐日贡献 X_active_k·f_k(t)
+    daily: pd.DataFrame          # index=date, 汇总列：style_total/industry_total/country/specific/active_return/residual
+    summary: pd.DataFrame        # index=归因项（16风格因子+行业合计+Country+特质+残差+合计）
+
+    def __str__(self) -> str:
+        return self.summary.to_string(float_format=lambda v: f"{v:+.4f}")
+
+
+class ReturnAttributor:
+    """CNE6 因子收益归因器。
+
+    Parameters
+    ----------
+    risk_model : CNE6RiskModel
+        因子暴露来源（须与 factor_loader 同源，即均来自 ClickHouse cne6_risk）。
+    factor_loader : FactorReturnLoader
+        因子收益 / 个股特质收益来源。
+    """
+
+    def __init__(self, risk_model: CNE6RiskModel, factor_loader: FactorReturnLoader) -> None:
+        self.risk_model = risk_model
+        self.factor_loader = factor_loader
+
+    def run(
+        self,
+        weight_df: pd.DataFrame,
+        benchmark_weight_df: pd.DataFrame,
+        adj_close: pd.DataFrame,
+    ) -> AttributionResult:
+        """
+        Parameters
+        ----------
+        weight_df : 组合调仓权重，index=调仓（信号）日, columns=ticker
+        benchmark_weight_df : 基准权重，同形状；调仓日可与 weight_df 不同，
+            按 weight_df 的调仓日 asof（取 ≤ 该日的最近基准快照）对齐。
+            alpha_max 无自然基准时可传等权全市场权重矩阵。
+        adj_close : 复权收盘价，index=交易日, columns=ticker。用于计算
+            「真实主动收益」做残差自检 —— 纯持仓收益，不含成本/执行摩擦
+            （归因分解的是 gross 收益，成本另有单独口径，不在本模块范围）。
+
+        Returns
+        -------
+        AttributionResult
+        """
+        weight_df = _ensure_datetime_index(weight_df)
+        benchmark_weight_df = _ensure_datetime_index(benchmark_weight_df)
+        adj_close = _ensure_datetime_index(adj_close)
+
+        rebal_dates = list(weight_df.index)
+        if not rebal_dates:
+            raise ValueError("weight_df 为空")
+        bm_dates = list(benchmark_weight_df.index)
+
+        # 持有期为 (T_i, T_{i+1}]：T_i 当天仍按上一期权重计入收益，
+        # T_i 决定的新权重从 T_i+1 起才实际持有（T+1 执行）。
+        trading_dates = [d for d in adj_close.index if d > rebal_dates[0]]
+        daily_ret = adj_close.pct_change(fill_method=None)
+
+        factor_names: list[str] | None = None
+        factor_rows: dict = {}
+        specific_rows: dict = {}
+        truth_rows: dict = {}
+        coverage_rows: dict = {}
+        skipped = 0
+
+        for i, t_i in enumerate(rebal_dates):
+            t_next = rebal_dates[i + 1] if i + 1 < len(rebal_dates) else None
+            period_dates = [
+                d for d in trading_dates
+                if d > t_i and (t_next is None or d <= t_next)
+            ]
+            if not period_dates:
+                continue
+
+            w_p = weight_df.loc[t_i].dropna()
+            w_p = w_p[w_p != 0]
+
+            bm_asof = [d for d in bm_dates if d <= t_i]
+            if not bm_asof:
+                skipped += len(period_dates)
+                continue
+            w_b = benchmark_weight_df.loc[bm_asof[-1]].dropna()
+            w_b = w_b[w_b != 0]
+
+            w_p_a, w_b_a = _align_union(w_p, w_b)
+            w_active = w_p_a - w_b_a
+            tickers = list(w_active.index)
+
+            risk_snap = self.risk_model.at(t_i.date(), tickers)
+            if risk_snap is None:
+                skipped += len(period_dates)
+                continue
+            if factor_names is None:
+                factor_names = risk_snap.factor_names
+
+            w_arr = w_active.reindex(tickers).values
+            x_active = w_arr @ risk_snap.X   # (K,) 该持有期内固定的主动暴露
+
+            # 覆盖率诊断：risk_snap.X 全 0 的票不在模型估计域（univ_flag==1）内，
+            # 其收益仅计入"真实主动收益"、不进任何归因项，全部漏进残差。
+            # 覆盖率低的期间，残差应偏大，据此判断该期归因是否可信。
+            covered_mask = np.abs(risk_snap.X).sum(axis=1) > 0
+            total_active_l1 = float(np.abs(w_arr).sum())
+            coverage_pct = (
+                float(np.abs(w_arr[covered_mask]).sum()) / total_active_l1
+                if total_active_l1 > 1e-12 else float("nan")
+            )
+
+            for d in period_dates:
+                f_t = self.factor_loader.factor_return(d.date(), factor_names)
+                factor_rows[d] = x_active * f_t.values
+
+                u_t = self.factor_loader.specific_return(d.date(), tickers)
+                specific_rows[d] = float(w_arr @ u_t.values)
+
+                r_t = daily_ret.loc[d].reindex(tickers).fillna(0.0)
+                truth_rows[d] = float(w_arr @ r_t.values)
+                coverage_rows[d] = coverage_pct
+
+        if not factor_rows:
+            raise ValueError("无可归因的调仓期（检查风险面板/因子收益覆盖范围是否与回测区间重叠）")
+
+        factor_daily = pd.DataFrame(factor_rows, index=factor_names).T.sort_index()
+        specific_daily = pd.Series(specific_rows).sort_index()
+        active_truth = pd.Series(truth_rows).sort_index()
+        coverage = pd.Series(coverage_rows).sort_index()
+
+        style_cols = [c for c in factor_daily.columns if c in STYLE_FACTORS]
+        industry_cols = [
+            c for c in factor_daily.columns if c not in STYLE_FACTORS and c != _COUNTRY
+        ]
+
+        daily = pd.DataFrame({
+            "style_total": factor_daily[style_cols].sum(axis=1),
+            "industry_total": factor_daily[industry_cols].sum(axis=1),
+            "country": factor_daily[_COUNTRY] if _COUNTRY in factor_daily.columns else 0.0,
+            "specific": specific_daily,
+            "active_return": active_truth,
+            "coverage_pct": coverage,
+        })
+        daily["explained"] = (
+            daily["style_total"] + daily["industry_total"] + daily["country"] + daily["specific"]
+        )
+        daily["residual"] = daily["active_return"] - daily["explained"]
+
+        items: dict[str, pd.Series] = {f: factor_daily[f] for f in style_cols}
+        items["行业合计"] = daily["industry_total"]
+        items["Country"] = daily["country"]
+        items["特质(选股)"] = daily["specific"]
+        items["残差"] = daily["residual"]
+        items["合计(主动收益)"] = daily["active_return"]
+
+        summary = _carino_summary(items, daily["active_return"])
+
+        return AttributionResult(factor_daily=factor_daily, daily=daily, summary=summary)
+
+
+__all__ = ["ReturnAttributor", "AttributionResult"]

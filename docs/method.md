@@ -237,7 +237,45 @@ print(res.style_active_exposure(risk_snap.style_loading()))
 
 ---
 
-## 9. 已知局限
+## 9. 收益归因（Return Attribution）
+
+> 对应代码：[`analysis/attribution.py`](../portfolio_optimizer/analysis/attribution.py)、
+> [`risk/attribution_data.py`](../portfolio_optimizer/risk/attribution_data.py)。
+> CLI：`hqopt attribute`（见 [操作指南.md](操作指南.md)）。
+
+**动机**：一条超额净值曲线好看，不代表 alpha 干净——可能是优化器偷偷吃了某个
+风格 beta（如小盘、低波）。归因把每期主动收益拆成风格 / 行业 / Country / 个股
+特质（选股）贡献，回答"钱到底从哪来"。
+
+**方法**：每个调仓期 $(T_i, T_{i+1}]$ 内，主动权重 $w_{active}=w_p-w_{bm}$ 与主动
+暴露 $X_{active}=X^\top w_{active}$ 固定不变（信号日 $T_i$ 的 as-of 值，与优化器
+决策时用的暴露一致）；$T_i$ 当天仍按上一期权重计入收益，$T_i$ 决定的新权重从
+$T_i+1$ 起才实际持有（T+1 执行，与回测引擎时序一致）。持有期内逐日：
+
+$$
+\text{主动收益}(t) \approx \underbrace{X_{active}^\top f(t)}_{\text{风格+行业+Country}} + \underbrace{w_{active}^\top u(t)}_{\text{选股（特质）}}
+$$
+
+$f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse `cne6_risk.factor_return` /
+`specific_return`，与暴露 $X$（`cne6_risk.factor_exposure`）**同源**，保证残差
+自检有意义。多期用 Carino(1999) 平滑系数链接，保证 $\Sigma$ 各归因项累计 =
+真实几何累计主动收益。
+
+**残差自检**：每日「主动收益 − (风格+行业+Country+特质)」理论上应 ≈0；非零
+主要来自**覆盖缺口**——`cne6_risk` 只覆盖其估计域（`univ_flag==1`，剔除次新/
+极小市值等），组合或基准里在域外的持仓收益全部漏进残差。`daily["coverage_pct"]`
+给出每期"被模型覆盖的主动权重占比"可供判断，但覆盖率与残差占比非线性关系
+（未覆盖的常是高波动票，权重小也可能贡献不成比例的残差）。**残差占比高的
+期间，归因结论需谨慎**；合成数据（完全覆盖）下残差严格为 0，证明分解算式
+本身正确，见 `tests/test_attribution.py`。
+
+**已知局限**：暴露按持有期冻结（不随日频更新），调仓越不频繁，暴露与
+`f(t)/u(t)` 实际估计所用的当日暴露之间的近似误差可能越大；`t统计` 为简单
+`mean/std` 未做自相关调整（非 NW 稳健标准误）。
+
+---
+
+## 10. 已知局限
 
 | 局限 | 说明 / 改进方向 |
 |---|---|

@@ -18,7 +18,8 @@ import logging
 from portfolio_optimizer.data.generator import MarketSnapshot, TradingStatus
 from portfolio_optimizer.data.real_adapter import RealMarketAdapter
 from portfolio_optimizer.data.benchmark import IndexBenchmarkWeights
-from portfolio_optimizer.risk import CNE6RiskModel
+from portfolio_optimizer.risk import CNE6RiskModel, FactorReturnLoader
+from portfolio_optimizer.analysis import AttributionResult, ReturnAttributor
 from portfolio_optimizer.optimizer.alpha_max import (
     AlphaMaxConfig,
     AlphaMaxOptimizer,
@@ -43,7 +44,9 @@ __all__ = [
     "MarketSnapshot", "TradingStatus",
     "RealMarketAdapter", "IndexBenchmarkWeights",
     # 风险
-    "CNE6RiskModel",
+    "CNE6RiskModel", "FactorReturnLoader",
+    # 归因
+    "AttributionResult", "ReturnAttributor",
     # 优化
     "AlphaMaxConfig", "AlphaMaxOptimizer", "AlphaMaxResult",
     "IndexEnhanceConfig", "IndexEnhanceOptimizer", "IndexEnhanceResult",

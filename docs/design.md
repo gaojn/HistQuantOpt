@@ -133,13 +133,17 @@ portfolio_optimizer/
 ├── factors/
 │   └── alpha_factors.py    # Alpha 预处理（去极值/标准化）
 ├── risk/
-│   └── cne6_risk.py        # CNE6 因子风险模型（暴露 X / 协方差 F / 特质 Δ）
+│   ├── cne6_risk.py        # CNE6 因子风险模型（暴露 X / 协方差 F / 特质 Δ）
+│   └── attribution_data.py # 因子收益 f(t) / 个股特质收益 u(t) 加载器（收益归因用）
 ├── optimizer/
 │   ├── alpha_max.py        # 量化选股 QP 优化器
 │   └── index_enhance.py    # 指数增强 QP 优化器
 ├── backtest/
 │   ├── engine.py           # 真实执行回测（T+1 VWAP/涨跌停/成本）+ 绩效指标
 │   └── report.py           # Plotly HTML 报告
+├── analysis/
+│   ├── attribution.py      # 收益归因（风格/行业/Country/特质分解，Carino多期链接）
+│   └── run.py              # 权重→归因，供 hqopt attribute 复用
 └── pipeline/
     ├── batch_optimize.py   # 逐期批量优化（两策略）
     └── universe.py         # 候选池过滤 / 成本向量 / 合成 alpha
@@ -182,3 +186,7 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
    > 说明：行情数据在停牌日对价格字段（adj_close / adj_vwap）做**前值填充**（仅 volume/amount 为 0），因此停牌持仓按最近价估值（NAV 不失真），停牌卖单 `exec_p>0` 会正确进入延期队列、复牌后成交。优化阶段目标 `w=0`（意图卖出）+ 回测延期卖出，整体自洽且贴近现实。
 3. **流动性为软惩罚（非硬约束）**：通过 `turnover_penalty` + 个股冲击成本向量（基于 ADV）软性压制换手，未实现 ADV 参与率硬约束。
 4. **求解器**：优先 CLARABEL，失败降级 SCS 兜底。
+5. **收益归因是独立分析层，不进主链路**：`analysis/` 只读消费 `weight_df`（优化产出）
+   与 ClickHouse `cne6_risk.factor_return/specific_return`（与暴露 X 同源），事后拆解
+   超额收益；不参与 optimize/backtest 主流程，也不反向影响它们。方法与残差自检的
+   已知局限见 [method.md §9](method.md#9-收益归因return-attribution)。
