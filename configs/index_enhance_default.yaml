@@ -36,6 +36,7 @@ optimizer:
     Profitability: 0.50         # 盈利能力
   tracking_penalty: 10.0        # L2 偏离基准惩罚 γ（未启用 risk_aversion 时才生效）
   risk_aversion: 10.0           # CNE6 因子协方差进目标（真跟踪误差）；置空则退回 tracking_penalty
+  min_risk_coverage: 0.90       # 基准权重的 CNE6 最低覆盖率；不足则跳过该期并告警（2020年初实测约93%，勿设过高）
   max_turnover: 0.40            # 双边换手硬上限 40%（≈单边 20%）
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
   active_weight_upper: 0.01     # 单票主动偏离上限 |w_i-w_bm_i| ≤ δ，null=不约束；典型值 0.01~0.03

@@ -5,11 +5,9 @@
 
 方法
 ----
-每个调仓期 ``[T_i, T_{i+1}]`` 内，主动权重与因子暴露沿用信号日 T_i 的
-as-of 值不变（与优化器决策时用的暴露一致）；持有区间为 ``(T_i, T_{i+1}]``
-——即信号日 T_i 当天仍按上一期权重计入收益，T_i 决定的新权重从 T_i+1 起
-才实际持有（对应 T+1 执行），与 :mod:`hqopt.backtest.engine`
-的执行时序保持一致，避免"用当天新权重解释当天已发生收益"的时序错配。
+每个调仓期 ``(T_i, T_{i+1}]`` 使用信号日 T_i 的风险暴露快照；若提供成交账本
+生成的逐日实际权重，则主动权重随实际成交、价格漂移逐日更新，否则沿用目标权重。
+这样停牌、涨跌停和延期订单不会被误当成已成交。
 
 持有期内逐日用当日已实现的因子收益 f(t) 与个股特质收益 u(t) 计算贡献：
 
@@ -138,6 +136,7 @@ class ReturnAttributor:
         weight_df: pd.DataFrame,
         benchmark_weight_df: pd.DataFrame,
         adj_close: pd.DataFrame,
+        actual_weight_df: pd.DataFrame | None = None,
     ) -> AttributionResult:
         """
         Parameters
@@ -149,6 +148,8 @@ class ReturnAttributor:
         adj_close : 复权收盘价，index=交易日, columns=ticker。用于计算
             「真实主动收益」做残差自检 —— 纯持仓收益，不含成本/执行摩擦
             （归因分解的是 gross 收益，成本另有单独口径，不在本模块范围）。
+        actual_weight_df : 逐日实际股票权重，通常来自真实回测成交账本。
+            None 时兼容旧用法，在每个持有期内沿用目标权重。
 
         Returns
         -------
@@ -157,6 +158,8 @@ class ReturnAttributor:
         weight_df = _ensure_datetime_index(weight_df)
         benchmark_weight_df = _ensure_datetime_index(benchmark_weight_df)
         adj_close = _ensure_datetime_index(adj_close)
+        if actual_weight_df is not None:
+            actual_weight_df = _ensure_datetime_index(actual_weight_df)
 
         rebal_dates = list(weight_df.index)
         if not rebal_dates:
@@ -184,8 +187,8 @@ class ReturnAttributor:
             if not period_dates:
                 continue
 
-            w_p = weight_df.loc[t_i].dropna()
-            w_p = w_p[w_p != 0]
+            target_weight = weight_df.loc[t_i].dropna()
+            target_weight = target_weight[target_weight != 0]
 
             bm_asof = [d for d in bm_dates if d <= t_i]
             if not bm_asof:
@@ -194,9 +197,16 @@ class ReturnAttributor:
             w_b = benchmark_weight_df.loc[bm_asof[-1]].dropna()
             w_b = w_b[w_b != 0]
 
-            w_p_a, w_b_a = _align_union(w_p, w_b)
-            w_active = w_p_a - w_b_a
-            tickers = list(w_active.index)
+            if actual_weight_df is None:
+                period_weight = pd.DataFrame(
+                    [target_weight] * len(period_dates), index=period_dates
+                ).fillna(0.0)
+            else:
+                period_weight = actual_weight_df.reindex(period_dates).ffill().fillna(0.0)
+            held_columns = period_weight.columns[
+                (period_weight.abs() > 1e-12).any(axis=0)
+            ]
+            tickers = list(pd.Index(held_columns).union(w_b.index))
 
             risk_snap = self.risk_model.at(t_i.date(), tickers)
             if risk_snap is None:
@@ -205,20 +215,12 @@ class ReturnAttributor:
             if factor_names is None:
                 factor_names = risk_snap.factor_names
 
-            w_arr = w_active.reindex(tickers).values
-            x_active = w_arr @ risk_snap.X   # (K,) 该持有期内固定的主动暴露
-
-            # 覆盖率诊断：risk_snap.X 全 0 的票不在模型估计域（univ_flag==1）内，
-            # 其收益仅计入"真实主动收益"、不进任何归因项，全部漏进残差。
-            # 覆盖率低的期间，残差应偏大，据此判断该期归因是否可信。
-            covered_mask = np.abs(risk_snap.X).sum(axis=1) > 0
-            total_active_l1 = float(np.abs(w_arr).sum())
-            coverage_pct = (
-                float(np.abs(w_arr[covered_mask]).sum()) / total_active_l1
-                if total_active_l1 > 1e-12 else float("nan")
-            )
-
             for d in period_dates:
+                w_p = period_weight.loc[d].reindex(tickers).fillna(0.0)
+                w_active = w_p - w_b.reindex(tickers).fillna(0.0)
+                w_arr = w_active.values
+                x_active = w_arr @ risk_snap.X
+
                 f_t = self.factor_loader.factor_return(d.date(), factor_names)
                 factor_rows[d] = x_active * f_t.values
 
@@ -227,7 +229,11 @@ class ReturnAttributor:
 
                 r_t = daily_ret.loc[d].reindex(tickers).fillna(0.0)
                 truth_rows[d] = float(w_arr @ r_t.values)
-                coverage_rows[d] = coverage_pct
+                total_active_l1 = float(np.abs(w_arr).sum())
+                coverage_rows[d] = (
+                    float(np.abs(w_arr[risk_snap.covered_mask]).sum()) / total_active_l1
+                    if total_active_l1 > 1e-12 else float("nan")
+                )
 
         if not factor_rows:
             raise ValueError("无可归因的调仓期（检查风险面板/因子收益覆盖范围是否与回测区间重叠）")

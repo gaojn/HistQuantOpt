@@ -33,7 +33,7 @@ import cvxpy as cp
 import numpy as np
 import pandas as pd
 
-from hqopt.data.generator import MarketSnapshot, TradingStatus
+from hqopt.data.generator import MarketSnapshot
 
 if TYPE_CHECKING:
     from hqopt.risk.cne6_risk import RiskSnapshot
@@ -273,7 +273,10 @@ class IndexEnhanceOptimizer:
 
             # 7b. 硬上限（可与软惩罚同时存在）
             if cfg.max_turnover is not None:
-                constraints.append(cp.sum(delta_w) <= cfg.max_turnover)
+                # 实际成交可能因涨停/停牌留下现金，使股票权重和 < 1。
+                # 现金重新投入不挤占原本用于股票间调仓的换手预算。
+                cash_gap = max(0.0, 1.0 - float(w_prev.sum()))
+                constraints.append(cp.sum(delta_w) <= cfg.max_turnover + cash_gap)
 
         # 8. L2 偏离基准硬约束（TE 代理）
         if cfg.weight_diff_l2_bound is not None:

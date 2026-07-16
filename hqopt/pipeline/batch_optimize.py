@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ import yaml
 
 from hqopt.data.benchmark import IndexBenchmarkWeights
 from hqopt.data.real_adapter import RealMarketAdapter
+from hqopt.backtest.execution import ExecutionLedger
 from hqopt.io.data_panel import load_panel
 from hqopt.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from hqopt.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
@@ -32,6 +34,50 @@ from hqopt.risk import CNE6RiskModel
 logger = logging.getLogger(__name__)
 
 _INDEX_NAMES = {"hs300": "沪深300", "zz500": "中证500", "zz1000": "中证1000"}
+_STRATEGIES = {"index_enhance", "alpha_max"}
+_ALPHA_SOURCES = {"file", "synthetic"}
+
+# 求解器数值粉尘阈值：低于该权重的目标置零后重归一，避免账本按 min_notional
+# 买入微量仓位（此类仓位一旦退市即成为永久滞留资产）。
+_DUST_WEIGHT_TOL = 1e-6
+# 滞留持仓"显著"阈值：仅用于告警分级展示，不影响处理逻辑。
+_STUCK_WEIGHT_TOL = 1e-4
+
+_EXECUTION_COLUMNS = (
+    "date", "code", "adj_close", "adj_vwap", "close",
+    "limit_up", "limit_down", "trade_status",
+)
+
+
+def _partition_execution_days(
+    panel: pl.DataFrame,
+    start_date: date,
+    end_date: date,
+) -> dict[date, pl.DataFrame]:
+    """按交易日切分成交所需字段，供逐期优化按日推进实际持仓账本。"""
+    missing = [column for column in _EXECUTION_COLUMNS if column not in panel.columns]
+    if missing:
+        raise ValueError(f"行情面板缺少实际成交所需字段：{missing}")
+    execution_panel = panel.filter(
+        (pl.col("date") >= start_date) & (pl.col("date") <= end_date)
+    ).select(_EXECUTION_COLUMNS)
+    return {
+        key[0] if isinstance(key, tuple) else key: day
+        for key, day in execution_panel.partition_by("date", as_dict=True).items()
+    }
+
+
+def _advance_execution_day(ledger: ExecutionLedger, day: pl.DataFrame) -> None:
+    """把一个 polars 日截面送入共享成交账本。"""
+    pdf = day.drop("date").to_pandas().set_index("code")
+    ledger.step(
+        adj_close=pdf["adj_close"],
+        adj_vwap=pdf["adj_vwap"],
+        close_raw=pdf["close"],
+        limit_up=pdf["limit_up"],
+        limit_down=pdf["limit_down"],
+        trade_status=pdf["trade_status"],
+    )
 
 
 def _parse_style_bound(v: Any) -> "float | dict[str, float]":
@@ -39,6 +85,12 @@ def _parse_style_bound(v: Any) -> "float | dict[str, float]":
     if isinstance(v, dict):
         return {str(k): float(val) for k, val in v.items()}
     return float(v)
+
+
+def _optional_float(config: dict[str, Any], key: str) -> float | None:
+    """解析可空数值配置；显式 0.0 必须保留。"""
+    value = config.get(key)
+    return None if value is None else float(value)
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -71,6 +123,10 @@ def run_batch_optimize(
     """
     cfg = load_config(config) if isinstance(config, (str, Path)) else config
     strategy  = cfg["strategy"]          # "index_enhance" | "alpha_max"
+    if strategy not in _STRATEGIES:
+        raise ValueError(
+            f"strategy 须为 {sorted(_STRATEGIES)} 之一，当前为 {strategy!r}"
+        )
     index     = cfg["index"]
     bt_cfg    = cfg["backtest"]
     uni_cfg   = cfg["universe"]
@@ -97,7 +153,7 @@ def run_batch_optimize(
         panel = load_panel(
             data_start, end_date,
             columns=[
-                "code", "date", "adj_close", "close",
+                "code", "date", "adj_close", "adj_vwap", "close",
                 "limit_up", "limit_down", "amount",
                 "float_mv", "free_mv", "total_mv",
                 "free_turnover", "trade_status",
@@ -120,6 +176,11 @@ def run_batch_optimize(
                 "回测业绩不可信）——不接受默认兜底，防止漏配时误用前视信号。"
             )
         alpha_source = alpha_cfg["source"]
+        if alpha_source not in _ALPHA_SOURCES:
+            raise ValueError(
+                f"alpha.source 须为 {sorted(_ALPHA_SOURCES)} 之一，"
+                f"当前为 {alpha_source!r}"
+            )
         if alpha_source == "file":
             logger.info(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
             alpha_df = load_alpha_panel(alpha_cfg["path"])
@@ -160,6 +221,15 @@ def run_batch_optimize(
     rebal_dates = trade_dates[::rebal_freq]
     logger.info(f"\n  回测交易日数={len(trade_dates)}  再平衡日数={len(rebal_dates)}")
 
+    execution_cfg = cfg.get("execution", {})
+    execution_ledger = ExecutionLedger(
+        initial_value=port_val,
+        cost_buy=float(execution_cfg.get("cost_buy", 0.001)),
+        cost_sell=float(execution_cfg.get("cost_sell", 0.002)),
+    )
+    execution_days = _partition_execution_days(panel, start_date, end_date)
+    execution_cursor = 0
+
     # ── 优化器 ───────────────────────────────────────────────
     adapter = RealMarketAdapter()
 
@@ -169,12 +239,15 @@ def run_batch_optimize(
     # cne6_data_dir：风险面板来源目录，默认 None → CNE6RiskModel 默认路径
     # （短周期 CNE6S，data/barra_cne6/）；传 "data/barra_cne6_L" 则改用长周期
     # CNE6L 面板（hl=252，月度以上策略）。
-    risk_aversion = float(opt_cfg["risk_aversion"]) if opt_cfg.get("risk_aversion") else None
+    risk_aversion = _optional_float(opt_cfg, "risk_aversion")
+    min_risk_coverage = float(opt_cfg.get("min_risk_coverage", 0.90))
+    if not 0.0 <= min_risk_coverage <= 1.0:
+        raise ValueError("optimizer.min_risk_coverage 必须位于 [0, 1]")
     cne6_data_dir = opt_cfg.get("cne6_data_dir") or None
     cne6_rm = CNE6RiskModel(data_dir=cne6_data_dir)
     cov0, cov1 = cne6_rm.coverage
     tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6(默认/短周期S)"
-    mode = f"λ={risk_aversion}" if risk_aversion else "L2 偏离惩罚"
+    mode = f"λ={risk_aversion}" if risk_aversion is not None else "L2 偏离惩罚"
     logger.info(f"\n[3a] CNE6 风险模型[{tag}]  覆盖={cov0}~{cov1}  目标风险项={mode}")
 
     if strategy == "index_enhance":
@@ -189,10 +262,10 @@ def run_batch_optimize(
             industry_active_bound=float(opt_cfg["industry_active_bound"]),
             style_active_bound=_parse_style_bound(opt_cfg["style_active_bound"]),
             tracking_penalty=float(opt_cfg["tracking_penalty"]),
-            max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
+            max_turnover=_optional_float(opt_cfg, "max_turnover"),
             turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
-            active_weight_upper=float(opt_cfg["active_weight_upper"]) if opt_cfg.get("active_weight_upper") else None,
-            weight_diff_l2_bound=float(opt_cfg["weight_diff_l2_bound"]) if opt_cfg.get("weight_diff_l2_bound") else None,
+            active_weight_upper=_optional_float(opt_cfg, "active_weight_upper"),
+            weight_diff_l2_bound=_optional_float(opt_cfg, "weight_diff_l2_bound"),
             risk_aversion=risk_aversion,
         )
         optimizer = IndexEnhanceOptimizer(base_config)
@@ -204,7 +277,7 @@ def run_batch_optimize(
             min_constituent_ratio=float(opt_cfg.get("min_constituent_ratio", 0.0)),
             diversification_penalty=float(opt_cfg.get("diversification_penalty", 0.05)),
             style_bound=_parse_style_bound(opt_cfg["style_bound"]) if opt_cfg.get("style_bound") is not None else None,
-            max_turnover=float(opt_cfg["max_turnover"]) if opt_cfg.get("max_turnover") else None,
+            max_turnover=_optional_float(opt_cfg, "max_turnover"),
             turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
             risk_aversion=risk_aversion,
         )
@@ -219,35 +292,58 @@ def run_batch_optimize(
     logger.info("\n[4] 逐期优化...")
     t_total = time.time()
     weight_records: dict = {}
-    prev_w_arr, prev_tickers = None, None
+    has_prior_target = False
     fail_count = 0
     solve_times = []
+    target_turnovers: list[float] = []
 
     for i, rebal_date in enumerate(rebal_dates):
         t0 = time.time()
 
+        # 先推进到本调仓日收盘：上一目标的 T+1 成交及所有延期订单均已反映在账本中。
+        while execution_cursor < len(trade_dates) and trade_dates[execution_cursor] <= rebal_date:
+            execution_date = trade_dates[execution_cursor]
+            day = execution_days.get(execution_date)
+            if day is None:
+                raise RuntimeError(f"{execution_date} 缺少成交行情截面")
+            _advance_execution_day(execution_ledger, day)
+            execution_cursor += 1
+
+        actual_holdings = execution_ledger.actual_weights()
+
         try:
             snap_full = adapter.build_snapshot_from_panel(
                 panel=panel, target_date=rebal_date,
-                index=index, portfolio_value=port_val,
+                index=index, portfolio_value=execution_ledger.nav,
             )
         except ValueError as e:
             logger.info(f"  [{rebal_date}] 跳过（快照失败：{e}）")
             continue
 
-        # 构建上期持仓 Series（首期为 None），用于 carry 逻辑
-        prev_holdings_series = (
-            pd.Series(prev_w_arr, index=prev_tickers)
-            if prev_w_arr is not None and prev_tickers is not None
-            else None
-        )
+        # 有实际持仓却无当日行情（退市/长停滞留）：这些票无法交易也无法估计风险，
+        # 不进优化域，按场外滞留资产处理——继续优化其余部分。账本只按真实现金成交，
+        # 不会把滞留市值误当现金再分配（超买部分会被现金约束等比例缩减）。
+        missing_actual = actual_holdings[
+            ~actual_holdings.index.isin(snap_full.tickers) & (actual_holdings > 1e-8)
+        ]
+        if not missing_actual.empty:
+            significant = missing_actual[missing_actual > _STUCK_WEIGHT_TOL]
+            detail = (
+                f"，其中显著持仓 {significant.round(6).to_dict()}"
+                if not significant.empty else "（均为粉尘仓位）"
+            )
+            logger.warning(
+                f"  [{rebal_date}] 实际持仓中 {len(missing_actual)} 只缺当日行情"
+                f"（合计权重 {float(missing_actual.sum()):.4%}），"
+                f"作为滞留资产排除在优化域外{detail}"
+            )
 
         snapshot = filter_universe(
             snap_full, panel, rebal_date,
             exclude_bj=bool(uni_cfg.get("exclude_bj", True)),
             exclude_st=bool(uni_cfg.get("exclude_st", True)),
             top_n=int(uni_cfg["top_n"]) if uni_cfg.get("top_n") else None,
-            prev_holdings=prev_holdings_series,
+            prev_holdings=actual_holdings if has_prior_target else None,
         )
 
         # 风格载荷 + 风险模型：均来自 CNE6 面板（16 风格 + 行业）。
@@ -257,31 +353,25 @@ def run_batch_optimize(
         if risk_snap is None:
             logger.info(f"  [{rebal_date}] 跳过（CNE6 风险面板无覆盖）")
             continue
+        uncovered = pd.Series(~risk_snap.covered_mask, index=snapshot.tickers, dtype=bool)
+        if uncovered.any():
+            existing_sell_only = (
+                snapshot.sell_only.reindex(snapshot.tickers).fillna(False).astype(bool)
+                if snapshot.sell_only is not None
+                else pd.Series(False, index=snapshot.tickers, dtype=bool)
+            )
+            snapshot = replace(snapshot, sell_only=(existing_sell_only | uncovered))
+            logger.warning(
+                f"  [{rebal_date}] CNE6 未覆盖 {int(uncovered.sum())} 只："
+                "禁止新开仓，已有持仓只卖不买"
+            )
         style_loading = risk_snap.style_loading()
 
         alpha = get_alpha_for_date(alpha_df, rebal_date, snapshot.tickers)
 
-        # 上期权重对齐
-        # carry 票已由 filter_universe 并入 snapshot.tickers，
-        # 因此 reindex 后只有真退市票（当日无行情）会丢失权重。
-        if prev_w_arr is not None and prev_tickers is not None:
-            ps_series = pd.Series(prev_w_arr, index=prev_tickers)
-            ps_reindexed = ps_series.reindex(snapshot.tickers).fillna(0.0)
-            dropped = float(ps_series.sum() - ps_reindexed.sum())
-            if dropped > 1e-6:
-                snapshot_ticker_set = set(snapshot.tickers)
-                dropped_tickers = {
-                    t: float(ps_series[t])
-                    for t in prev_tickers
-                    if t not in snapshot_ticker_set and float(ps_series.get(t, 0.0)) > 1e-8
-                }
-                logger.warning(
-                    f"  [{rebal_date}] 真退市票被剔除（当日无行情）: "
-                    f"{dropped_tickers}，权重缺口={dropped:.4f}，执行归一"
-                )
-                s = ps_reindexed.sum()
-                ps_reindexed = ps_reindexed / s if s > 1e-8 else ps_reindexed
-            ps = ps_reindexed.values
+        # 上期权重来自实际成交账本，现金保留为权重缺口，不做重新归一化。
+        if has_prior_target:
+            ps = actual_holdings.reindex(snapshot.tickers).fillna(0.0).values
         else:
             ps = None
 
@@ -298,6 +388,20 @@ def run_batch_optimize(
         if strategy == "index_enhance":
             bm_series = bm.get_weights(rebal_date, tickers=snapshot.tickers)
             bm_weight = bm_series.values
+            bm_total = float(bm_series.sum())
+            covered_weight = (
+                float(bm_series.values[risk_snap.covered_mask].sum()) / bm_total
+                if bm_total > 1e-12 else 0.0
+            )
+            if covered_weight < min_risk_coverage:
+                # 覆盖率异常多为面板数据阶段性缺口（如 2020 年初），跳过该期
+                # 并保留账本原目标继续执行；不中断整段回测。
+                fail_count += 1
+                logger.warning(
+                    f"  [{rebal_date}] 跳过优化：基准风险覆盖率 {covered_weight:.2%} "
+                    f"低于阈值 {min_risk_coverage:.2%}（零暴露填充不可信）"
+                )
+                continue
 
             cfg_this = base_config if ps is not None else IndexEnhanceConfig(
                 **{**base_config.__dict__, "max_turnover": None}
@@ -325,10 +429,19 @@ def run_batch_optimize(
 
         if result.is_feasible:
             w = pd.Series(result.weights, index=snapshot.tickers)
+            # 清除求解器数值粉尘再重归一：微量权重会被账本按 min_notional 真实
+            # 买入，退市后成为永久滞留资产。
+            w = w.where(w >= _DUST_WEIGHT_TOL, 0.0)
+            w_sum = float(w.sum())
+            if w_sum > 1e-8:
+                w = w / w_sum
             weight_records[rebal_date] = w
-            prev_w_arr, prev_tickers = result.weights, snapshot.tickers
+            execution_ledger.submit_target(w)
+            has_prior_target = True
 
             turnover = float(np.abs(result.weights - ps).sum()) if ps is not None else float("nan")
+            if ps is not None:
+                target_turnovers.append(turnover)
             if i % 10 == 0 or i == len(rebal_dates) - 1:
                 extra = ""
                 if strategy == "index_enhance":
@@ -340,28 +453,8 @@ def run_batch_optimize(
         else:
             fail_count += 1
             logger.info(f"  [{rebal_date}] ✗ 求解失败：{result.status}")
-            if prev_w_arr is not None:
-                # 失败回退：沿用上期权重；carry 票已在 snapshot.tickers 内，
-                # 只有真退市票（无当日行情）才会丢失权重。
-                ps_series_fb = pd.Series(prev_w_arr, index=prev_tickers)
-                w = ps_series_fb.reindex(snapshot.tickers).fillna(0.0)
-                dropped_fb = float(ps_series_fb.sum() - w.sum())
-                if dropped_fb > 1e-6:
-                    snapshot_ticker_set_fb = set(snapshot.tickers)
-                    dropped_fb_tickers = {
-                        t: float(ps_series_fb[t])
-                        for t in prev_tickers
-                        if t not in snapshot_ticker_set_fb
-                        and float(ps_series_fb.get(t, 0.0)) > 1e-8
-                    }
-                    logger.warning(
-                        f"  [{rebal_date}] (失败回退) 真退市票被剔除: "
-                        f"{dropped_fb_tickers}，权重缺口={dropped_fb:.4f}，执行归一"
-                    )
-                    s = w.sum()
-                    if s > 1e-8:
-                        w = w / s
-                weight_records[rebal_date] = w
+            # 不提交新目标：成交账本继续追踪上一个尚未完成的目标，避免用失败回退
+            # 覆盖掉真实的延期订单状态。
 
     # ── 汇总 & 保存 ──────────────────────────────────────────
     if not weight_records:
@@ -369,17 +462,16 @@ def run_batch_optimize(
 
     weight_df = pd.DataFrame(weight_records).T.fillna(0.0)
     weight_df.index.name = "date"
-    turnover_arr = weight_df.diff().abs().sum(axis=1).dropna()
-
     logger.info(f"\n{'='*65}\n  批量优化汇总\n{'='*65}")
     logger.info(f"  再平衡期数   : {len(weight_df)}")
     logger.info(f"  失败期数     : {fail_count}")
     logger.info(f"  平均持仓数   : {(weight_df > 1e-6).sum(axis=1).mean():.0f} 只")
-    logger.info(f"  平均双边换手 : {turnover_arr.mean()*100:.1f}%")
+    avg_target_turnover = float(np.mean(target_turnovers)) if target_turnovers else float("nan")
+    logger.info(f"  平均目标换手 : {avg_target_turnover*100:.1f}%（相对实际持仓）")
     logger.info(f"  平均耗时     : {np.mean(solve_times):.2f}s  总耗时: {time.time()-t_total:.1f}s")
 
     out_path = Path(out_cfg["weights"])
-    out_path.parent.mkdir(exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     weight_df.to_parquet(out_path)
     logger.info(f"\n  权重矩阵已保存：{out_path}")
     logger.info(f"\n{'='*65}\n")

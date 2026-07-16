@@ -66,6 +66,19 @@ def test_signal_executes_next_day_not_same_day():
     assert result.nav.iloc[-1] == pytest.approx(result.nav.iloc[1], abs=1e-6)
 
 
+def test_non_trading_rebalance_date_rejected():
+    """调仓日不在行情交易日历中时应明确报错，不能静默丢弃目标。"""
+    dates = pd.bdate_range("2024-01-08", periods=3)
+    frames = _frames(dates, ["A"])
+    weight_df = pd.DataFrame(
+        {"A": [1.0]},
+        index=[pd.Timestamp("2024-01-06")],  # 周六
+    )
+
+    with pytest.raises(ValueError, match="调仓日不在行情交易日历"):
+        _run(weight_df, frames)
+
+
 # ── 涨停拦截买入 ─────────────────────────────────────────────────
 
 
@@ -112,8 +125,8 @@ def test_limit_down_defers_sell():
 # ── 停牌不可成交 ─────────────────────────────────────────────────
 
 
-def test_suspension_blocks_buy():
-    """执行日停牌的票无法买入，资金滞留现金。"""
+def test_suspension_blocks_then_retries_buy():
+    """执行日停牌时买入失败，复牌后应继续追踪原目标并完成买入。"""
     dates = pd.bdate_range("2024-01-02", periods=5)
     tickers = ["A"]
     frames = _frames(dates, tickers)
@@ -123,8 +136,12 @@ def test_suspension_blocks_buy():
     result, stats = _run(weight_df, frames)
 
     assert stats["buy_fail_count"] >= 1
-    # 买入失败 → 全程几乎满仓现金，NAV 维持 1.0
-    assert result.nav.iloc[-1] == pytest.approx(1.0, abs=1e-6)
+    assert stats["target_pending"] is False
+    assert stats["final_actual_weights"]["A"] > 0.99
+    assert result.actual_weights.loc[dates[1]].sum() == 0.0
+    assert result.actual_weights.loc[dates[2], "A"] > 0.99
+    # 复牌后完成建仓并扣除买入成本
+    assert result.nav.iloc[-1] == pytest.approx(0.999, abs=2e-3)
 
 
 # ── 退市估值回归（#2 修复）─────────────────────────────────────────
@@ -203,6 +220,66 @@ def test_suspension_blocks_sell():
     _, stats = _run(weight_df, frames)
     # B 停牌无法卖出 → 进延期队列
     assert stats["sell_defer_count"] >= 1
+
+
+def test_deferred_sell_also_completes_buy_leg():
+    """卖出恢复后必须继续买入目标股票，不能留下长期现金。"""
+    dates = pd.bdate_range("2024-01-02", periods=7)
+    tickers = ["A", "B"]
+    frames = _frames(dates, tickers)
+    frames["trade_status"].loc[dates[3], "A"] = "停牌"
+    weight_df = pd.DataFrame(
+        {"A": [1.0, 0.5], "B": [0.0, 0.5]},
+        index=[dates[0], dates[2]],
+    )
+
+    bt = RealisticBacktester(cost_buy=0.0, cost_sell=0.0, risk_free=0.0)
+    result, stats = bt.run(
+        weight_df=weight_df,
+        adj_close=frames["adj_close"],
+        adj_vwap=frames["adj_vwap"],
+        close_raw=frames["close_raw"],
+        limit_up_df=frames["limit_up"],
+        limit_down_df=frames["limit_down"],
+        trade_status_df=frames["trade_status"],
+        initial_value=INIT,
+    )
+
+    assert stats["sell_defer_count"] >= 1
+    assert stats["target_pending"] is False
+    assert stats["final_cash_pct"] < 1e-8
+    assert stats["final_actual_weights"]["A"] == pytest.approx(0.5, abs=1e-6)
+    assert stats["final_actual_weights"]["B"] == pytest.approx(0.5, abs=1e-6)
+    assert result.nav.iloc[-1] == pytest.approx(1.0, abs=1e-9)
+
+
+def test_rebalance_order_sizing_uses_vwap_not_close():
+    """收盘价与 VWAP 不同时，订单差额和成交股数必须使用同一 VWAP 口径。"""
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    frames = _frames(dates, ["A", "B"])
+    # day2 收盘提交 50/50 目标；day3 执行时 A 的 VWAP=10、收盘=20。
+    frames["adj_close"].loc[dates[3]:, "A"] = 20.0
+    weight_df = pd.DataFrame(
+        {"A": [1.0, 0.5], "B": [0.0, 0.5]},
+        index=[dates[0], dates[2]],
+    )
+
+    bt = RealisticBacktester(cost_buy=0.0, cost_sell=0.0, risk_free=0.0)
+    result, stats = bt.run(
+        weight_df=weight_df,
+        adj_close=frames["adj_close"],
+        adj_vwap=frames["adj_vwap"],
+        close_raw=frames["close_raw"],
+        limit_up_df=frames["limit_up"],
+        limit_down_df=frames["limit_down"],
+        trade_status_df=frames["trade_status"],
+        initial_value=INIT,
+    )
+
+    # VWAP 时点成交后 A/B 各 5 百万股；A 随后按 20 元收盘，故收盘权重为 2/3、1/3。
+    assert stats["final_actual_weights"]["A"] == pytest.approx(2 / 3, abs=1e-6)
+    assert stats["final_actual_weights"]["B"] == pytest.approx(1 / 3, abs=1e-6)
+    assert result.nav.iloc[-1] == pytest.approx(1.5, abs=1e-9)
 
 
 def test_calc_metrics_constant_returns():

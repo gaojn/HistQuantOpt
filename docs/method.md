@@ -35,6 +35,8 @@ $$
 
 - $w\in\mathbb{R}^N$：组合权重；$\alpha$：预期收益信号（推荐截面 z-score）
 - 换手项：$c_i$ 为个股成本权重（默认按 $\sigma_i/\sqrt{ADV_i}$ 的冲击成本代理），软约束
+- $w_{prev}$：成交账本在本调仓日收盘的实际股票权重；未成交现金保留为权重缺口，
+  不会用上一期目标权重代替，也不会把股票权重重新归一化到 1
 
 **风险项 $R(w)$ 有两种形态**，由是否配置 `risk_aversion` 决定：
 
@@ -67,7 +69,7 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 | 3 | 成分股下限 | $\sum_{i\in C} w_i \ge R_{\min}$（可选） | $\sum_{i\in C_{\text{index}}} w_i \ge R_{\min}$ |
 | 4 | 行业 | $\sum_{i\in k} w_i \le I_{\max}$ | $\lvert\sum_{i\in k}(w_i-w_{bm,i})\rvert \le I_{\text{act}}$ |
 | 5 | 风格 | $\lvert B_k^\top w\rvert \le S_{\max,k}$ | $\lvert B_k^\top(w-w_{bm})\rvert \le S_{\text{act},k}$ |
-| 6 | 换手（硬上限，可选） | $\lVert w-w_{\text{prev}}\rVert_1 \le T_{\max}$ | 同 |
+| 6 | 换手（硬上限，可选） | $\lVert w-w_{\text{prev}}\rVert_1 \le T_{\max}+c$，$c=\max(0,1-\sum w_{prev})$ | 同 |
 | 7 | 交易状态 | 见下 | 同 |
 
 > 风格上限 $S$ 支持标量（统一）或 dict（按因子名分别约束，可带 `default` 兜底）。
@@ -93,6 +95,10 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 
 alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方向）。
 冻结票因 $w_i = w_{\text{prev},i}$ 等式约束，$|w_i - w_{\text{prev},i}| = 0$，自动不消耗换手预算。
+
+**风险覆盖保护**：CNE6 原始暴露和特质方差均完整才记为覆盖。未覆盖股票并入
+`sell_only`，禁止新开仓、已有持仓只能减仓；指数增强按基准权重计算覆盖率，低于
+`min_risk_coverage`（默认 0.90）跳过该期优化并告警（不中断整段回测），避免缺失值填 0 造成假中性。
 
 涨跌停约束需传 `prev_weight`；状态判定见 [`RealMarketAdapter._compute_status`](../hqopt/data/real_adapter.py)。
 
@@ -161,10 +167,12 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 ## 6. 求解与性能
 
 - **类型**：凸二次规划（QP），求解器 **CLARABEL**（`max_iter=500`）；两个优化器（`index_enhance`/`alpha_max`）均在 CLARABEL 失败时降级 **SCS**（`max_iters=10000`）兜底
-- **失败处理**：返回 `infeasible`，pipeline 保持上期权重（重新归一）或跳过
+- **失败处理**：返回 `infeasible` 时不提交新目标；成交账本继续执行旧的未完成目标
 - **数值稳定**：求解后 `clip(0)` + 归一化消除浮点误差
 - **规模**：全市场 ~5000 只（剔北交所+ST）约 1s/期
 - **首个调仓日**：组合日收益固定为 0（首日全仓现金，T+1 才建仓），基准当日有收益，存在一日不对等（对 Sharpe 影响极小，但长期回测首日图形可见跳变）。
+- **延期成交**：涨停不可买、跌停不可卖、停牌不可交易的订单会保留；后续交易日
+  按实际持仓与最新目标重新计算差额。新一期目标会替换尚未完成的旧目标
 - **risk_aversion 置 0**：显式设 `risk_aversion: 0.0` 将完全关闭风险惩罚项（factor_risk/specific_risk 均不加入目标函数），等价于纯 alpha 最大化；与 `risk_aversion: null`（退回 L2 兜底）行为不同。
 
 **infeasible 常见原因**：成分股下限太高、行业约束太紧（某行业基准权重为 0 时易冲突）、
@@ -267,13 +275,13 @@ print(res.style_active_exposure(risk_snap.style_loading()))
 风格 beta（如小盘、低波）。归因把每期主动收益拆成风格 / 行业 / Country / 个股
 特质（选股）贡献，回答"钱到底从哪来"。
 
-**方法**：每个调仓期 $(T_i, T_{i+1}]$ 内，主动权重 $w_{active}=w_p-w_{bm}$ 与主动
-暴露 $X_{active}=X^\top w_{active}$ 固定不变（信号日 $T_i$ 的 as-of 值，与优化器
-决策时用的暴露一致）；$T_i$ 当天仍按上一期权重计入收益，$T_i$ 决定的新权重从
-$T_i+1$ 起才实际持有（T+1 执行，与回测引擎时序一致）。持有期内逐日：
+**方法**：每个调仓期 $(T_i, T_{i+1}]$ 使用信号日 $T_i$ 的风险暴露快照；目标权重
+先经共享成交账本按 T+1 VWAP、涨跌停、停牌和费用逐日重放，得到实际权重
+$w_{p,t}$。主动权重 $w_{active,t}=w_{p,t}-w_{bm}$ 与主动暴露
+$X_{active,t}=X^\top w_{active,t}$ 因实际成交和价格漂移逐日更新：
 
 $$
-\text{主动收益}(t) \approx \underbrace{X_{active}^\top f(t)}_{\text{风格+行业+Country}} + \underbrace{w_{active}^\top u(t)}_{\text{选股（特质）}}
+\text{主动收益}(t) \approx \underbrace{X_{active,t}^\top f(t)}_{\text{风格+行业+Country}} + \underbrace{w_{active,t}^\top u(t)}_{\text{选股（特质）}}
 $$
 
 $f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse `cne6_risk.factor_return` /
@@ -289,8 +297,9 @@ $f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse `cne6
 期间，归因结论需谨慎**；合成数据（完全覆盖）下残差严格为 0，证明分解算式
 本身正确，见 `tests/test_attribution.py`。
 
-**已知局限**：暴露按持有期冻结（不随日频更新），调仓越不频繁，暴露与
-`f(t)/u(t)` 实际估计所用的当日暴露之间的近似误差可能越大；`t统计` 为简单
+**已知局限**：风险模型暴露快照仍按持有期冻结，调仓越不频繁，暴露与
+`f(t)/u(t)` 实际估计所用的当日暴露之间的近似误差可能越大；成交发生在日内 VWAP，
+而因子收益是收盘到收盘口径，因此成交日仍可能出现时点残差；`t统计` 为简单
 `mean/std` 未做自相关调整（非 NW 稳健标准误）。
 
 ---

@@ -293,24 +293,22 @@ class IndexBenchmarkWeights:
         # 调整后市值
         pdf["adj_mv"] = pdf["total_mv_adj"] * pdf["A"]
 
-        # ---- 转宽表，前向填充（仅在册区间内），归一化 ----
+        # ---- 转宽表，前向填充（仅在册日），归一化 ----
         adj_mv_wide = pdf.pivot(index="date", columns="code", values="adj_mv")
         adj_mv_wide.index = pd.to_datetime(adj_mv_wide.index).date
         adj_mv_wide = adj_mv_wide.sort_index()
 
-        # ffill 前先记录各列"末次在册日"（原始有值的最后一行）：
-        # 掉出指数的票在末次在册日之后 ffill 出的值应清零，否则旧市值残留在基准中。
-        # 停牌日（在册但市值 NaN）会被 ffill 正常填充；掉出后权重归零。
-        last_valid_pre_ffill = adj_mv_wide.apply(
-            lambda col: col.last_valid_index() if col.notna().any() else None
+        roster = (
+            panel.select(["date", "code", self._col])
+            .to_pandas()
+            .pivot(index="date", columns="code", values=self._col)
         )
-        # 前向填充：停牌股保持上一有效日 adjusted_mv（价格冻结）
-        adj_mv_wide = adj_mv_wide.ffill()
-        # 掉出指数的票：末次在册日后置 NaN（由此在归一化后权重变 0）
-        for code in adj_mv_wide.columns:
-            last_dt = last_valid_pre_ffill.get(code)
-            if last_dt is not None:
-                adj_mv_wide.loc[adj_mv_wide.index > last_dt, code] = np.nan
+        roster.index = pd.to_datetime(roster.index).date
+        roster = roster.reindex(
+            index=adj_mv_wide.index, columns=adj_mv_wide.columns, fill_value=0
+        ).fillna(0).astype(bool)
+        # 停牌日在册时保留前值；任何退出区间（包括之后重新进入）都立即清零。
+        adj_mv_wide = adj_mv_wide.ffill().where(roster)
 
         # 截面归一化
         row_sum = adj_mv_wide.sum(axis=1).replace(0, np.nan)

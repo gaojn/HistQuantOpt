@@ -14,8 +14,8 @@ scripts/export_cne6_panels.py 从 ClickHouse the_quant.cne6_risk 导出。
   对应"中心化发布 → 只读消费"）。
 - as-of 对齐：给定 target_date，取 ≤ target_date 的最近调仓日的风险模型（防前视）；
   早于面板最早日则返回 None，优化器自动退回 L2 惩罚。
-- 股票对齐：暴露缺失填 0；特质方差缺失填当期截面中位数（避免 δ=0 让优化器
-  把"零特质风险"的票配到极端权重）。
+- 股票对齐：保留原始覆盖掩码；暴露缺失填 0、特质方差缺失填当期截面中位数仅
+  用于矩阵数值稳定。pipeline 会禁止未覆盖股票新开仓，不能把填充值视为真实暴露。
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ class RiskSnapshot:
     X: np.ndarray               # (N, K) 因子暴露
     F: np.ndarray               # (K, K) 因子协方差（对称 PSD）
     delta: np.ndarray           # (N,)   特质方差
+    covered_mask: np.ndarray    # (N,)   暴露与特质方差均完整的股票
 
     @property
     def style_names(self) -> list[str]:
@@ -141,6 +142,10 @@ class CNE6RiskModel:
         spec_median = float(np.nanmedian(day["spec_var"].to_numpy()))
 
         aligned = day.reindex(tickers)
+        covered_mask = (
+            aligned[list(factor_names)].notna().all(axis=1)
+            & aligned["spec_var"].notna()
+        ).to_numpy(dtype=bool)
         X = aligned[list(factor_names)].fillna(0.0).to_numpy().astype(np.float64)
         delta = aligned["spec_var"].fillna(spec_median).to_numpy().astype(np.float64)
 
@@ -151,4 +156,5 @@ class CNE6RiskModel:
             X=X,
             F=F,
             delta=delta,
+            covered_mask=covered_mask,
         )

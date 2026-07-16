@@ -13,12 +13,11 @@ RealisticBacktester：T+1 VWAP 成交 + 涨跌停 + 停牌处理。
 from __future__ import annotations
 
 from dataclasses import dataclass
-import warnings
 
 import numpy as np
 import pandas as pd
 
-from hqopt.constants import LIMIT_TOL
+from hqopt.backtest.execution import ExecutionLedger
 
 
 @dataclass
@@ -65,6 +64,7 @@ class BacktestResult:
     portfolio_metrics: PerformanceMetrics
     benchmark_metrics: PerformanceMetrics
     risk_free: float = 0.02      # 年化无风险利率（Sharpe 用，与 calc_metrics 保持一致）
+    actual_weights: pd.DataFrame | None = None  # 每日收盘实际股票权重（现金不在列内）
 
     def summary(self) -> str:
         lines = [
@@ -198,6 +198,19 @@ class RealisticBacktester:
             weight_df.index = pd.to_datetime(weight_df.index)
 
         rebal_dates = sorted(weight_df.index)
+        missing_rebal_dates = pd.DatetimeIndex(rebal_dates).difference(
+            pd.DatetimeIndex(adj_close.index)
+        )
+        if not missing_rebal_dates.empty:
+            preview = ", ".join(
+                date.strftime("%Y-%m-%d") for date in missing_rebal_dates[:5]
+            )
+            suffix = (
+                f"（共 {len(missing_rebal_dates)} 日）"
+                if len(missing_rebal_dates) > 5
+                else ""
+            )
+            raise ValueError(f"调仓日不在行情交易日历中: {preview}{suffix}")
         first_rebal = rebal_dates[0]
 
         all_dates = adj_close.index[adj_close.index >= first_rebal]
@@ -217,172 +230,43 @@ class RealisticBacktester:
         ld   = align(limit_down_df)
         ts   = align(trade_status_df)
 
-        # 涨跌停和停牌布尔矩阵（ticker 轴对齐到 adj_close 的 columns）
-        common = adj_close.columns
-        is_lup = (cr.reindex(columns=common) >= lu.reindex(columns=common) * (1 - LIMIT_TOL)).fillna(False)
-        is_ldn = (cr.reindex(columns=common) <= ld.reindex(columns=common) * (1 + LIMIT_TOL)).fillna(False)
-        is_sus = (ts.reindex(columns=common) == "停牌").fillna(False)
-
-        # ── 状态 ─────────────────────────────────────────────────
-        shares: dict[str, float]       = {}   # ticker → 持仓份额（分数股）
-        cash: float                    = initial_value
-        pending_sells: dict[str, float] = {}  # ticker → 待卖份额
+        # 成交账本同时被逐期优化使用，保证目标生成和回测采用完全一致的执行语义。
+        ledger = ExecutionLedger(
+            initial_value=initial_value,
+            cost_buy=self.cost_buy,
+            cost_sell=self.cost_sell,
+        )
 
         # ── 输出 ─────────────────────────────────────────────────
         port_values  = pd.Series(0.0, index=all_dates)
         turnover_rec: dict = {}
         cash_ratio_rec: list[float] = []
+        actual_weight_rows: dict = {}
 
-        # 执行统计
-        buy_fail_cnt  = 0
-        sell_defer_cnt = 0
-
-        pending_rebal: pd.Timestamp | None = None   # T 日信号，T+1 执行
+        rebal_date_set = set(rebal_dates)
 
         for date in all_dates:
-            # 取当日各矩阵的行（Series，index=ticker）
-            ac_row = ac.loc[date]
-            av_row = av.loc[date]
-            lup_row = is_lup.loc[date]
-            ldn_row = is_ldn.loc[date]
-            sus_row = is_sus.loc[date]
+            day_result = ledger.step(
+                adj_close=ac_raw.loc[date],
+                adj_vwap=av.loc[date],
+                close_raw=cr.loc[date],
+                limit_up=lu.loc[date],
+                limit_down=ld.loc[date],
+                trade_status=ts.loc[date],
+            )
+            if day_result.turnover > 0:
+                turnover_rec[date] = day_result.turnover
 
-            def exec_p(ticker: str) -> float:
-                """当日 adj_vwap，若无效返回 0。"""
-                v = av_row.get(ticker)
-                return float(v) if v is not None and pd.notna(v) and v > 0 else 0.0
-
-            def cant_buy(ticker: str) -> bool:
-                return bool(sus_row.get(ticker, False)) or bool(lup_row.get(ticker, False))
-
-            def cant_sell(ticker: str) -> bool:
-                return bool(sus_row.get(ticker, False)) or bool(ldn_row.get(ticker, False))
-
-            # ── 1. 执行待卖单（跌停/停牌后延续尝试）────────────────
-            for ticker in list(pending_sells):
-                sh = pending_sells[ticker]
-                if sh < 1e-10:
-                    del pending_sells[ticker]
-                    continue
-                if cant_sell(ticker):
-                    continue   # 继续延迟
-                p = exec_p(ticker)
-                if p <= 0:
-                    continue
-                actual_sh = shares.get(ticker, 0.0)
-                sh_sold   = min(sh, actual_sh)
-                if sh_sold > 1e-10:
-                    shares[ticker] = actual_sh - sh_sold
-                    cash += sh_sold * p * (1.0 - self.cost_sell)
-                del pending_sells[ticker]
-
-            # ── 2. 执行 T 日调仓信号（T+1 成交）─────────────────
-            # rebal_dates 即 weight_df.index 的子集，pending_rebal 必在其中，无需再查
-            if pending_rebal is not None:
-                tgt_w = weight_df.loc[pending_rebal].fillna(0.0)
-
-                # 当前总市值（按 adj_vwap 估值）
-                total_val = cash
-                for t, sh in shares.items():
-                    p = exec_p(t)
-                    if p > 0:
-                        total_val += sh * p
-
-                # 目标价值
-                tgt_vals = (tgt_w * total_val).to_dict()
-
-                # 当前价值
-                cur_vals: dict[str, float] = {}
-                for t, sh in shares.items():
-                    p = exec_p(t)
-                    if p > 0:
-                        cur_vals[t] = sh * p
-
-                # 新调仓清空旧的待卖（以新目标为准）
-                pending_sells.clear()
-
-                sell_orders: dict[str, float] = {}
-                buy_orders:  dict[str, float] = {}
-                all_tickers = set(cur_vals) | set(tgt_vals)
-
-                for ticker in all_tickers:
-                    delta = tgt_vals.get(ticker, 0.0) - cur_vals.get(ticker, 0.0)
-                    if delta < -1.0:
-                        sell_orders[ticker] = -delta
-                    elif delta > 1.0:
-                        buy_orders[ticker] = delta
-
-                # 先执行卖出，释放现金
-                sell_total = 0.0
-                for ticker, sell_val in sell_orders.items():
-                    # 先判可否卖出：不可卖（跌停/停牌）则进延期队列
-                    if cant_sell(ticker):
-                        p = exec_p(ticker)
-                        if p > 0:
-                            pending_sells[ticker] = pending_sells.get(ticker, 0.0) + sell_val / p
-                            sell_defer_cnt += 1
-                        continue
-                    p = exec_p(ticker)
-                    if p <= 0:
-                        continue
-                    actual_sh = shares.get(ticker, 0.0)
-                    sh_to_sell = min(sell_val / p, actual_sh)
-                    if sh_to_sell > 1e-10:
-                        shares[ticker] = actual_sh - sh_to_sell
-                        proceeds = sh_to_sell * p * (1.0 - self.cost_sell)
-                        cash += proceeds
-                        sell_total += sh_to_sell * p
-
-                # 再执行买入（按需比例缩放，防超支）
-                buy_demand = sum(
-                    v for t, v in buy_orders.items() if not cant_buy(t) and exec_p(t) > 0
-                )
-                scale = min(1.0, cash / (buy_demand * (1.0 + self.cost_buy) + 1e-8)) \
-                        if buy_demand > 0 else 0.0
-
-                buy_total = 0.0
-                for ticker, buy_val in buy_orders.items():
-                    p = exec_p(ticker)
-                    if p <= 0:
-                        continue
-                    if cant_buy(ticker):
-                        buy_fail_cnt += 1
-                        continue
-                    actual_buy = buy_val * scale
-                    if actual_buy < 1.0:
-                        continue
-                    sh_bought = actual_buy / p
-                    cost = sh_bought * p * self.cost_buy
-                    shares[ticker] = shares.get(ticker, 0.0) + sh_bought
-                    cash -= sh_bought * p + cost
-                    buy_total += sh_bought * p
-
-                if cash < -1.0:
-                    warnings.warn(
-                        f"[回测引擎] {date}: 现金出现负值 {cash:.2f} 元，"
-                        "可能由浮点舍入或买入规模计算偏差引起，已截断至 0。",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                cash = max(cash, 0.0)
-
-                # 记录换手率（双边 / 总资产）
-                turnover_rec[date] = (sell_total + buy_total) / (total_val + 1e-12)
-                pending_rebal = None
-
-            # ── 3. 计算当日 NAV（adj_close 估值）───────────────
-            nav_val = cash
-            for t, sh in shares.items():
-                p = ac_row.get(t)
-                if p is not None and pd.notna(p) and p > 0 and sh > 1e-10:
-                    nav_val += sh * p
+            # ── 2. 计算当日 NAV（最近有效 adj_close 估值）────────
+            nav_val = ledger.nav
             port_values[date] = nav_val
+            actual_weight_rows[date] = ledger.actual_weights()
             if nav_val > 1e-8:
-                cash_ratio_rec.append(cash / nav_val)
+                cash_ratio_rec.append(ledger.cash / nav_val)
 
-            # ── 4. 更新调仓信号 ─────────────────────────────────
-            if date in set(rebal_dates):
-                pending_rebal = date
+            # ── 3. T 日收盘后提交目标，最早于下一交易日执行 ─────
+            if date in rebal_date_set:
+                ledger.submit_target(weight_df.loc[date].fillna(0.0))
 
         # ── 组合指标 ─────────────────────────────────────────────
         nav      = port_values / initial_value
@@ -402,6 +286,8 @@ class RealisticBacktester:
         exc_nav = nav / bm_nav
 
         turnover_s = pd.Series(turnover_rec, name="turnover")
+        actual_weights = pd.DataFrame(actual_weight_rows).T.fillna(0.0)
+        actual_weights.index.name = "date"
 
         # 退市/长停滞留告警：回测末日仍持有、但当日无真实价（靠 ffill 陈旧价估值）
         # 的持仓 —— 这些票实际已无法成交（退市或长期停牌），其估值不可全信。
@@ -410,7 +296,7 @@ class RealisticBacktester:
         ac_last      = ac.loc[last_date]
         stuck_cnt    = 0
         stuck_val    = 0.0
-        for t, sh in shares.items():
+        for t, sh in ledger.shares.items():
             if sh <= 1e-10:
                 continue
             if pd.isna(ac_raw_last.get(t)) and pd.notna(ac_last.get(t)):
@@ -433,12 +319,16 @@ class RealisticBacktester:
             portfolio_metrics=pm,
             benchmark_metrics=bm,
             risk_free=self.risk_free,
+            actual_weights=actual_weights,
         )
 
         exec_stats = {
-            "buy_fail_count":     buy_fail_cnt,
-            "sell_defer_count":   sell_defer_cnt,
+            "buy_fail_count":     ledger.buy_fail_count,
+            "sell_defer_count":   ledger.sell_defer_count,
             "avg_cash_pct":       float(np.mean(cash_ratio_rec)) if cash_ratio_rec else 0.0,
+            "final_cash_pct":     float(ledger.cash / final_nav) if final_nav > 1e-8 else 0.0,
+            "final_actual_weights": ledger.actual_weights().to_dict(),
+            "target_pending":     ledger.pending_target is not None,
             "delisted_stuck_count": stuck_cnt,        # 末日靠陈旧价估值的滞留持仓数
             "stale_value_pct":    float(stale_value_pct),  # 其价值占末日 NAV 比例
         }

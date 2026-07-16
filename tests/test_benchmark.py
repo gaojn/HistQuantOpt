@@ -90,7 +90,7 @@ def _make_panel_3stocks():
     """
     构造 3 支股票、5 个交易日的小面板：
     - A, B: 全程在成分内
-    - C: 前 3 天在成分，之后掉出（is_zz500=0）
+    - C: 前 3 天在成分，第 4 天掉出，第 5 天重新进入
     第 2 天 B 停牌（free_mv/total_mv=NaN）用于验证停牌日 ffill 正常工作
     """
     dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4),
@@ -100,7 +100,11 @@ def _make_panel_3stocks():
         for code, (in5, total_mv, free_mv) in {
             "A": (1, 100.0, 80.0),
             "B": (1, 200.0, 160.0),
-            "C": (1 if d <= date(2024, 1, 4) else 0, 50.0, 40.0),  # C 第4天后掉出
+            "C": (
+                1 if d <= date(2024, 1, 4) or d == date(2024, 1, 8) else 0,
+                50.0,
+                40.0,
+            ),
         }.items():
             # B 在第2天停牌（市值 NaN）
             if code == "B" and d == date(2024, 1, 3):
@@ -118,7 +122,7 @@ def _make_panel_3stocks():
 
 
 def test_ffill_respects_roster_boundary():
-    """掉出指数后权重归零；停牌日权重仍在（ffill 正常）。"""
+    """退出区间权重归零、重新进入后恢复；停牌日在册时仍可 ffill。"""
     panel = _make_panel_3stocks()
     bm = IndexBenchmarkWeights(index="zz500", panel=panel, source="reconstruct")
 
@@ -133,7 +137,11 @@ def test_ffill_respects_roster_boundary():
     )
     assert w_after["A"] + w_after["B"] == pytest.approx(1.0, abs=1e-6)
 
-    # ② 停牌日（B 第2天无市值）权重应仍存在（ffill 使用前一天市值）
+    # ② C 重新进入后恢复权重，证明中间退出区间不会被跨段 ffill。
+    w_reentry = bm.get_weights(date(2024, 1, 8), tickers=["A", "B", "C"])
+    assert w_reentry["C"] > 0.0
+
+    # ③ 停牌日（B 第2天无市值）权重应仍存在（ffill 使用前一天市值）
     w_susp = bm.get_weights(date(2024, 1, 3), tickers=["A", "B", "C"])
     assert w_susp["B"] > 0.0, f"停牌日 B 权重应通过 ffill 保持，实为 {w_susp['B']:.6f}"
     assert w_susp["A"] + w_susp["B"] + w_susp["C"] == pytest.approx(1.0, abs=1e-6)

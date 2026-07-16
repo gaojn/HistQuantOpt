@@ -120,10 +120,6 @@ def test_filter_then_optimize_carry_stock(snap30):
       - 优化后权重 ≤ 上期权重（不加仓）
       - 卖出量计入换手（total_turnover > 0 且不含被错误冻结）
     """
-    from dataclasses import replace
-
-    import numpy as np
-
     from hqopt.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 
     panel = _make_panel(snap30, TARGET)

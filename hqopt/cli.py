@@ -95,6 +95,8 @@ def cmd_attribute(args: argparse.Namespace) -> None:
     run_attribution(
         args.weights, args.start, args.end, index=args.index,
         out_dir=args.out_dir, cne6_data_dir=args.cne6_data_dir,
+        cost_buy=args.cost_buy, cost_sell=args.cost_sell,
+        initial_value=args.initial_value,
     )
 
 
@@ -134,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--cost-sell", type=float, default=0.002)
     pb.add_argument("--initial-value", type=float, default=1e8)
     pb.add_argument("--risk-free", type=float, default=None,
-                    help="年化无风险利率（Sharpe 用），默认读取 YAML execution.risk_free，否则 0.02")
+                    help="年化无风险利率（Sharpe 用），不传时默认 0.02")
     pb.set_defaults(func=cmd_backtest)
 
     pa = sub.add_parser("attribute", help="权重→收益归因（风格/行业/Country/特质分解）")
@@ -145,6 +147,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="基准：hs300/zz500/zz1000 用官方成分权重，其余（如 all/csiall）用全市场等权")
     pa.add_argument("--out-dir", default=None, help="归因结果输出目录")
     pa.add_argument("--cne6-data-dir", default=None, help="CNE6 风险面板目录，默认短周期 S")
+    pa.add_argument("--cost-buy", type=float, default=0.001)
+    pa.add_argument("--cost-sell", type=float, default=0.002)
+    pa.add_argument("--initial-value", type=float, default=1e8)
     pa.set_defaults(func=cmd_attribute)
 
     pdt = sub.add_parser("data", help="数据准备（透传到导出脚本）")

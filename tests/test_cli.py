@@ -33,10 +33,28 @@ def test_backtest_full():
     assert args.weights == "w.parquet" and args.index == "zz500"
 
 
+def test_backtest_risk_free_help_matches_default_behavior():
+    parser = build_parser()
+    backtest_parser = parser._subparsers._group_actions[0].choices["backtest"]
+    help_text = backtest_parser.format_help()
+
+    assert "默认 0.02" in help_text
+    assert "YAML" not in help_text
+
+
 def test_data_passthrough():
     args, extra = build_parser().parse_known_args(["data", "index-close", "--start", "2015-01-01"])
     assert args.cmd == "data" and args.what == "index-close"
     assert extra == ["--start", "2015-01-01"]
+
+
+def test_attribute_execution_options():
+    args, _ = build_parser().parse_known_args([
+        "attribute", "--weights", "w.parquet", "--start", "2024-01-01",
+        "--end", "2024-12-31", "--cost-buy", "0.002", "--initial-value", "50000000",
+    ])
+    assert args.cost_buy == 0.002
+    assert args.initial_value == 5e7
 
 
 def test_data_invalid_choice():

@@ -13,6 +13,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
+import hqopt.analysis.run as attribution_run
 from hqopt.analysis.attribution import ReturnAttributor
 from hqopt.risk.attribution_data import FactorReturnLoader
 from hqopt.risk.cne6_risk import CNE6RiskModel
@@ -177,3 +178,106 @@ def test_coverage_gap_leaks_into_residual(attributor, weight_df, benchmark_weigh
     period2_days = result.daily.index[3:]
     assert (result.daily.loc[period2_days, "coverage_pct"] < 1.0).all()
     assert result.daily.loc[period2_days, "residual"].abs().min() > 1e-6
+
+
+def test_risk_snapshot_preserves_missing_name_coverage(tmp_path):
+    """风险模型填数仅用于数值稳定，不能把未覆盖股票伪装成零暴露已覆盖。"""
+    _write_risk_panels(tmp_path)
+    risk_model = CNE6RiskModel(data_dir=tmp_path)
+
+    snapshot = risk_model.at(REBAL_DATES[0].date(), ["A", "MISSING"])
+
+    assert snapshot is not None
+    assert snapshot.covered_mask.tolist() == [True, False]
+    assert snapshot.X[1].tolist() == pytest.approx([0.0, 0.0])
+    assert snapshot.delta[1] == pytest.approx(0.01)
+
+
+def test_actual_execution_weights_override_targets(attributor, weight_df, benchmark_weight_df):
+    """目标未成交时，归因必须使用实际现金状态，而不是假设目标已持有。"""
+    actual = pd.DataFrame(0.0, index=[BASE_DATE, *TRADING_DATES], columns=["A", "B"])
+    actual.loc[TRADING_DATES[3]:, ["A", "B"]] = [0.7, 0.3]
+
+    result = attributor.run(
+        weight_df,
+        benchmark_weight_df,
+        _adj_close(),
+        actual_weight_df=actual,
+    )
+
+    # 期 1 实际全现金：主动权重为 A/B 各 -0.5，特质贡献为 -0.0005；
+    # 若错误使用目标 60/40，则会得到 +0.0003。
+    assert result.daily.iloc[:3]["specific"].values == pytest.approx(-0.0005, abs=1e-9)
+
+
+def test_attribution_coverage_uses_original_mask(tmp_path):
+    """单个因子缺失但其余暴露非零时，也必须按未覆盖处理。"""
+    _write_risk_panels(tmp_path)
+    exposure_path = tmp_path / "exposure_panel.parquet"
+    exposure = pl.read_parquet(exposure_path).with_columns(
+        pl.when(pl.col("code") == "B")
+        .then(None)
+        .otherwise(pl.col("Size"))
+        .alias("Size")
+    )
+    exposure.write_parquet(exposure_path)
+    _write_factor_return(tmp_path)
+    _write_specific_return(tmp_path)
+    attributor = ReturnAttributor(
+        CNE6RiskModel(data_dir=tmp_path),
+        FactorReturnLoader(data_dir=tmp_path),
+    )
+    portfolio = pd.DataFrame({"A": [0.0, 0.0], "B": [1.0, 1.0]}, index=REBAL_DATES)
+    benchmark = pd.DataFrame({"A": [1.0], "B": [0.0]}, index=[REBAL_DATES[0]])
+
+    result = attributor.run(portfolio, benchmark, _adj_close())
+
+    # 主动 L1 权重 A/B 各 1；仅 A 完整覆盖，因此覆盖率为 50%。
+    assert result.daily["coverage_pct"].values == pytest.approx(0.5, abs=1e-9)
+
+
+def test_run_attribution_replays_blocked_execution(tmp_path, monkeypatch):
+    """归因主路径应重放成交；首期全部停牌时必须识别为现金，而非目标持仓。"""
+    _write_risk_panels(tmp_path)
+    _write_factor_return(tmp_path)
+    _write_specific_return(tmp_path)
+    weights = pd.DataFrame(
+        {"A": [0.6, 0.7], "B": [0.4, 0.3]}, index=REBAL_DATES
+    )
+    weight_path = tmp_path / "weights.parquet"
+    weights.to_parquet(weight_path)
+
+    prices = _adj_close()
+    rows = []
+    for d in prices.index:
+        for code in ("A", "B"):
+            price = float(prices.loc[d, code])
+            rows.append({
+                "date": d.date(),
+                "code": code,
+                "adj_close": price,
+                "adj_vwap": price,
+                "close": price,
+                "limit_up": price * 2,
+                "limit_down": price / 2,
+                "trade_status": "停牌" if d in TRADING_DATES[:3] else "交易",
+            })
+    panel = pl.DataFrame(rows)
+    monkeypatch.setattr(attribution_run, "load_panel", lambda *args, **kwargs: panel)
+    monkeypatch.setattr(
+        attribution_run,
+        "FactorReturnLoader",
+        lambda: FactorReturnLoader(data_dir=tmp_path),
+    )
+
+    result = attribution_run.run_attribution(
+        weight_path,
+        BASE_DATE.date(),
+        TRADING_DATES[-1].date(),
+        index="all",
+        cne6_data_dir=tmp_path,
+        cost_buy=0.0,
+        cost_sell=0.0,
+    )
+
+    assert result.daily.iloc[:3]["specific"].values == pytest.approx(-0.0005, abs=1e-9)

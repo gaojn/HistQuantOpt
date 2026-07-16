@@ -15,6 +15,7 @@ import pandas as pd
 import polars as pl
 
 from hqopt.analysis.attribution import AttributionResult, ReturnAttributor
+from hqopt.backtest.engine import RealisticBacktester
 from hqopt.data.benchmark import IndexBenchmarkWeights
 from hqopt.io.data_panel import load_panel
 from hqopt.risk import CNE6RiskModel, FactorReturnLoader
@@ -75,6 +76,9 @@ def run_attribution(
     out_dir: str | Path | None = None,
     cache_dir: str | Path | None = None,
     cne6_data_dir: str | Path | None = None,
+    cost_buy: float = 0.001,
+    cost_sell: float = 0.002,
+    initial_value: float = 1e8,
 ) -> AttributionResult:
     """
     加载权重文件，执行 CNE6 因子收益归因。
@@ -112,11 +116,32 @@ def run_attribution(
     # ── 2. 行情面板 ──────────────────────────────────────────
     data_start = date(t1.year, 1, 1)
     logger.info(f"\n[2] 加载行情面板（{data_start} ~ {t2}）...")
-    panel = load_panel(
-        data_start, t2, columns=["code", "date", "adj_close"], cache_dir=cache_dir,
-    )
-    adj_close = _to_wide(panel, "adj_close")
+    execution_columns = [
+        "code", "date", "adj_close", "adj_vwap", "close",
+        "limit_up", "limit_down", "trade_status",
+    ]
+    panel = load_panel(data_start, t2, columns=execution_columns, cache_dir=cache_dir)
+    market = {
+        column: _to_wide(panel, column)
+        for column in execution_columns[2:]
+    }
+    adj_close = market["adj_close"]
     logger.info(f"  交易日={panel['date'].n_unique()}  股票={panel['code'].n_unique()}")
+
+    # 复用真实回测引擎重放目标权重，得到停牌/涨跌停/费用后的逐日实际持仓。
+    execution_result, _ = RealisticBacktester(
+        cost_buy=cost_buy, cost_sell=cost_sell, risk_free=0.0
+    ).run(
+        weight_df=weight_df,
+        adj_close=adj_close,
+        adj_vwap=market["adj_vwap"],
+        close_raw=market["close"],
+        limit_up_df=market["limit_up"],
+        limit_down_df=market["limit_down"],
+        trade_status_df=market["trade_status"],
+        benchmark_ret=pd.Series(0.0, index=adj_close.index),
+        initial_value=initial_value,
+    )
 
     # ── 3. 基准权重 ──────────────────────────────────────────
     logger.info(f"\n[3] 构建基准权重（{index}）...")
@@ -136,7 +161,12 @@ def run_attribution(
 
     # ── 5. 归因 ──────────────────────────────────────────────
     logger.info("\n[5] 执行归因（风格/行业/Country/特质分解 + Carino 多期链接）...")
-    result = ReturnAttributor(risk_model, factor_loader).run(weight_df, bm_matrix, adj_close)
+    result = ReturnAttributor(risk_model, factor_loader).run(
+        weight_df,
+        bm_matrix,
+        adj_close,
+        actual_weight_df=execution_result.actual_weights,
+    )
 
     logger.info(f"\n{'='*60}\n  收益归因  {t1}~{t2}  基准={index}\n{'='*60}")
     logger.info(f"\n{result}")

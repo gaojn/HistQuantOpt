@@ -8,8 +8,11 @@ _compute_status 单元测试。
 4. trade_status="交易" 且价格正常 → NORMAL
 """
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
 from hqopt.data.generator import TradingStatus
@@ -78,8 +81,6 @@ def test_normal_trading(adapter: RealMarketAdapter) -> None:
 
 def _old_compute_adv(panel: "pl.DataFrame", target_date, tickers, adv_window=20):
     """旧逻辑内联（基准对照）：逐票 groupby.apply。"""
-    import numpy as np
-    import polars as pl
     df = (
         panel
         .filter(pl.col("date") <= target_date)
@@ -105,8 +106,6 @@ def _make_adv_panel():
     - AA：第3、7天停牌（amount 有值但 trade_status=停牌）
     - BB：数据不足 window（只有 3 个非停牌日），验证 min_periods=1
     """
-    import polars as pl
-    from datetime import date
     dates = [date(2024, 1, d) for d in range(2, 12)]  # 10 天
     rows = []
     for i, d in enumerate(dates):
@@ -129,10 +128,6 @@ def _make_adv_panel():
 
 def test_adv_new_matches_old_logic():
     """新 polars 预计算 ADV 与旧 groupby.apply 逻辑在多日期上数值一致。"""
-    import polars as pl
-    from datetime import date
-    import pytest
-
     panel = _make_adv_panel()
     tickers = ["AA", "BB"]
     adv_window = 5

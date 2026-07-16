@@ -170,6 +170,8 @@ def run_backtest(
         })
         nav_df.to_parquet(out_path / "nav.parquet")
         result.turnover.to_frame("turnover").to_parquet(out_path / "turnover.parquet")
+        if result.actual_weights is not None:
+            result.actual_weights.to_parquet(out_path / "actual_weights.parquet")
         logger.info(f"  净值数据：{out_path / 'nav.parquet'}")
 
     return result, exec_stats
