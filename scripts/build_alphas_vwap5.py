@@ -21,7 +21,7 @@
       alphas/_summary.csv —— 各因子的输入参数与实测 IC/ICIR/自相关/换手
 
 运行：
-    cd /Users/guoguo/Desktop/HistQuantOpt
+    cd /Users/guoguo/Documents/HistQuantOpt
     python scripts/build_alphas_vwap5.py
 """
 
@@ -34,8 +34,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from portfolio_optimizer.io.data_panel import load_panel
-from portfolio_optimizer.research.signal_grid import (
+from hqopt.io.data_panel import load_panel
+from hqopt.research.signal_grid import (
     SignalGridRunner,
     DEFAULT_IC_LIST, DEFAULT_ICIR_LIST, DEFAULT_DECAY_LIST,
 )
@@ -130,4 +130,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()

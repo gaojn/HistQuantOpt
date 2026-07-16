@@ -2,7 +2,7 @@
 import pandas as pd
 import pytest
 
-from portfolio_optimizer.data.index_close import (
+from hqopt.data.index_close import (
     load_index_close,
     load_index_returns,
     available_indices,

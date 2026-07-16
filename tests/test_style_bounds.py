@@ -1,8 +1,9 @@
 """风格约束上限解析测试（float / dict / 缺 default）。"""
 import numpy as np
 
-from portfolio_optimizer.optimizer.index_enhance import _resolve_style_bounds, _UNBOUNDED
-from portfolio_optimizer.pipeline.batch_optimize import _parse_style_bound
+from hqopt.optimizer.alpha_max import _resolve_style_bounds as _resolve_alpha_style_bounds
+from hqopt.optimizer.index_enhance import _resolve_style_bounds, _UNBOUNDED
+from hqopt.pipeline.batch_optimize import _parse_style_bound
 
 FACTORS = ["Size", "Momentum", "Beta"]
 
@@ -32,3 +33,8 @@ def test_parse_style_bound_passthrough():
     assert _parse_style_bound(0.4) == 0.4
     d = _parse_style_bound({"default": 0.5, "Size": 0.3})
     assert d["Size"] == 0.3 and d["default"] == 0.5
+
+
+def test_alpha_max_style_bounds_match_index_enhance_behavior():
+    vec = _resolve_alpha_style_bounds({"default": 0.8, "Beta": 0.2}, FACTORS)
+    assert np.allclose(vec, [0.8, 0.8, 0.2])
