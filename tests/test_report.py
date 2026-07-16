@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from portfolio_optimizer.backtest.engine import BacktestResult, PerformanceMetrics
-from portfolio_optimizer.backtest.report import (
+from hqopt.backtest.engine import BacktestResult, PerformanceMetrics
+from hqopt.backtest.report import (
     _turnover_summary,
     _yearly_turnover_table,
     generate_html_report,

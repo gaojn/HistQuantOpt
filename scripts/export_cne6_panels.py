@@ -1,5 +1,5 @@
 """导出 CNE6 风险模型面板：从 ClickHouse the_quant.cne6_risk 拉取因子暴露 /
-因子协方差 / 特质风险，转换为 portfolio_optimizer.risk.cne6_risk.CNE6RiskModel
+因子协方差 / 特质风险，转换为 hqopt.risk.cne6_risk.CNE6RiskModel
 消费的格式。
 
 输出：
@@ -7,7 +7,7 @@
     data/barra_cne6_L/{exposure_panel,factor_cov_panel}.parquet  —— CNE6L（长周期 hl=252）
 
 因子集合（47 = 16 风格 + Country + 30 行业），与 cne6_risk schema 一致；
-与之配套的 STYLE_FACTORS 定义见 portfolio_optimizer/risk/cne6_risk.py。
+与之配套的 STYLE_FACTORS 定义见 hqopt/risk/cne6_risk.py。
 
 exposure 取自 cne6_risk.factor_exposure 的 zscore，按 univ_flag==1 过滤（估计域：
 当日可交易 + 上市满期）；Country 因子全市场暴露恒为 1；行业暴露由本地
@@ -15,7 +15,7 @@ data/cache/ashare_daily_<year>.parquet 的 industry_l1（中信一级）做 one-
 （""/"未知" 不计入 30 个行业因子，对应股票当日行业暴露为全 0）。
 
 数据源：ClickHouse the_quant.cne6_risk（环境变量 CLICKHOUSE_PASSWORD 必填，
-见 portfolio_optimizer/data/clickhouse_db.py）。
+见 hqopt/data/clickhouse_db.py）。
 
 运行：CLICKHOUSE_PASSWORD=... python scripts/export_cne6_panels.py
 """
@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import polars as pl
 
-from portfolio_optimizer.data.clickhouse_db import query_df
+from hqopt.data.clickhouse_db import query_df
 
 CACHE_DIR = Path("data/cache")
 OUT_DIRS = {"S": Path("data/barra_cne6"), "L": Path("data/barra_cne6_L")}

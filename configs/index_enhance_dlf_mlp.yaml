@@ -1,0 +1,53 @@
+# ============================================================================
+# 指数增强（index_enhance）— DeepLearningFactor MLP alpha，中证1000
+#   基于 configs/index_enhance_default.yaml 模板，仅替换 alpha 来源与回测区间
+#   （对齐 DeepLearningFactor MLP 模型 test 期：2024-01-02 ~ 2026-05-29）
+# ============================================================================
+strategy: index_enhance
+index: zz1000
+
+backtest:
+  start_date: "2024-01-01"
+  end_date: "2026-05-31"
+  rebalance_freq: 10
+  initial_value: 100000000
+
+universe:
+  exclude_bj: true
+  exclude_st: true
+  top_n: null
+
+optimizer:
+  weight_upper: 0.010
+  min_constituent_ratio: 0.80
+  industry_active_bound: 0.05
+  style_active_bound:
+    default: 0.60
+    Size: 0.20
+    Beta: 0.20
+    Momentum: 0.20
+    Liquidity: 0.20
+    ResidualVolatility: 0.25
+    Value: 0.50
+    Growth: 0.50
+    EarningsYield: 0.50
+    Profitability: 0.50
+  tracking_penalty: 10.0
+  risk_aversion: 10.0
+  max_turnover: 0.40
+  turnover_penalty: 0.01
+  active_weight_upper: 0.01
+  weight_diff_l2_bound: null
+
+alpha:
+  source: file
+  # alpha 来自 DeepLearningFactor test 期（2024-01 起）真实模型输出，非合成前视信号，可直接回测
+  path: "alphas/dlf_mlp_vwap5d.parquet"
+
+execution:
+  cost_buy: 0.001
+  cost_sell: 0.002
+  risk_free: 0.02
+
+output:
+  weights: "output/index_enhance_dlf_mlp/weights.parquet"

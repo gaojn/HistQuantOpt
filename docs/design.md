@@ -19,7 +19,7 @@
 
 ### 2.2 Barra CNE6 风格因子（16 个）
 
-来自 ClickHouse `cne6_risk`，定义见 `portfolio_optimizer/risk/cne6_risk.py::STYLE_FACTORS`：
+来自 ClickHouse `cne6_risk`，定义见 `hqopt/risk/cne6_risk.py::STYLE_FACTORS`：
 
 Size, MidCap, Beta, Momentum, ResidualVolatility, LongTermReversal, Liquidity,
 Value, EarningsYield, Growth, Profitability, InvestmentQuality, EarningsQuality,
@@ -87,8 +87,8 @@ $$|B_{\text{ind}}^\top w - B_{\text{ind}}^\top w_{\text{bm}}| \leq \varepsilon_{
 
 $$\|w - w_0\|_1 \leq T_{\max}$$
 
-当前实现按目标权重计算双边换手；停牌若被目标卖出，会计入目标换手，
-真实成交由回测引擎延期处理。
+冻结口径（批次2）：停牌持仓票不计入换手（$w_i=w_{\text{prev},i}$ 等式约束使 $|\Delta w_i|=0$）；
+掉池/次新/ST 持仓票以 sell_only 约束（$w_i \le w_{\text{prev},i}$）卖出，正常计入换手。
 
 #### 流动性约束
 
@@ -104,23 +104,30 @@ $$\|w - w_0\|_1 \leq T_{\max}$$
 | 状态            | 说明         | 优化器处理                                         |
 |---------------|------------|-----------------------------------------------|
 | `NORMAL`      | 正常交易       | 无特殊限制                                         |
-| `SUSPENDED`   | 停牌         | 目标权重 $w_i = 0$，真实回测不可成交并延期处理                  |
+| `SUSPENDED`   | 停牌         | 有持仓：$w_i = w_{\text{prev},i}$（冻结，不计换手）；无持仓：$w_i = 0$ |
 | `LIMIT_UP`    | 涨停（无法买入）   | $w_i \leq w_{0,i}$（只能减仓或持有）                   |
 | `LIMIT_DOWN`  | 跌停（无法卖出）   | $w_i \geq w_{0,i}$（只能加仓或持有，实际通常视为 SUSPENDED） |
 | `NEW_LISTING` | 上市首日/次新股  | $w_i = 0$（禁止持仓，规避炒作风险）                        |
 
-### 5.2 停牌股票的目标权重与真实成交
+### 5.2 停牌股票的目标权重与真实成交（冻结口径）
 
-当前优化器输出的是目标权重，不是已经执行后的真实持仓。停牌股票在目标组合中
-可被置为 0，表达“希望卖出”的意图；真实回测中停牌不可交易，卖单会延期到
-复牌且可成交时执行。停牌期间仍按行情前值填充价格估值，避免 NAV 断裂。
+优化器输出目标权重（非实际执行后持仓）。**停牌冻结口径**（批次2）：
+- 停牌且有持仓 → $w_i = w_{\text{prev},i}$（冻结），不产生卖单，不计换手，不释放现金；
+- 停牌且无持仓 → $w_i = 0$，维持原状。
+
+真实回测中停牌不可交易，回测引擎仅将”可成交且目标与当前偏差”的票生成委托单；
+复牌后再依据最新目标执行。停牌期间按行情前值填充价格估值，NAV 不断裂。
+
+**掉池/次新/ST 持仓票（sell_only 口径）**：`filter_universe` 将掉出候选池但当日有行情且
+有持仓的股票携带入优化域（`MarketSnapshot.sell_only=True`），优化器施加 $w_i \le w_{\text{prev},i}$，
+允许正常减仓并计换手，禁止加仓。真退市票（当日无行情）无法进优化域，清零归一并输出告警。
 
 ---
 
 ## 6. 模块结构
 
 ```
-portfolio_optimizer/
+hqopt/
 ├── data/
 │   ├── real_adapter.py     # parquet 面板 → MarketSnapshot
 │   ├── benchmark.py        # 指数成分权重（默认官方权重，缺则分级靠档重构）
@@ -130,8 +137,6 @@ portfolio_optimizer/
 ├── io/
 │   ├── data_panel.py       # load_panel 主入口
 │   └── schema.py           # 行情字段定义
-├── factors/
-│   └── alpha_factors.py    # Alpha 预处理（去极值/标准化）
 ├── risk/
 │   ├── cne6_risk.py        # CNE6 因子风险模型（暴露 X / 协方差 F / 特质 Δ）
 │   └── attribution_data.py # 因子收益 f(t) / 个股特质收益 u(t) 加载器（收益归因用）
@@ -162,10 +167,10 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
   （tickers/行业/ADV/状态/市值/成分）              │
     │            ┌───────── Alpha 因子（alphas/*.parquet）
     ▼            ▼          │
-  filter_universe  ────────►│
-    │                       ▼
-    └────────────►  optimizer（alpha_max / index_enhance, cvxpy）
-                            │  约束：预算/单票上限/行业/风格(CNE6)/换手/涨跌停/停牌
+  filter_universe(prev_holdings)  ──►│   # 候选池 ∪ 上期持仓（carry=sell_only）
+    │                                ▼
+    └────────────────►  optimizer（alpha_max / index_enhance, cvxpy）
+                                     │  约束：预算/上限(frozen豁免)/行业/风格/换手/涨跌停/冻结/sell_only
                             ▼
                     逐期权重矩阵 weight_df
                             │
@@ -182,8 +187,12 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
 ## 8. 关键设计决策
 
 1. **风险项两档**：`risk_aversion` 设置时用 CNE6 真因子风险 `λ·(active'XFX'active+δ'active²)`；否则退回 L2 偏离惩罚 `γ·‖w−w_bm‖²`。
-2. **交易状态约束（实现口径）**：停牌/次新在优化中约束为 `w=0`（alpha 置 0）；涨停 `w≤w_prev`、跌停 `w≥w_prev`。真实回测中涨停不可买（留现金）、跌停不可卖（进延期队列）、停牌不可交易。
-   > 说明：行情数据在停牌日对价格字段（adj_close / adj_vwap）做**前值填充**（仅 volume/amount 为 0），因此停牌持仓按最近价估值（NAV 不失真），停牌卖单 `exec_p>0` 会正确进入延期队列、复牌后成交。优化阶段目标 `w=0`（意图卖出）+ 回测延期卖出，整体自洽且贴近现实。
+2. **交易状态约束（停牌冻结口径，批次2）**：
+   - 停牌有持仓 → 冻结 `w=w_prev`（不计换手）；停牌无持仓 → `w=0`。
+   - 掉池/次新/ST 有持仓 → sell_only `w≤w_prev`（卖出计换手）；无持仓 → `w=0`。
+   - 涨停 `w≤w_prev`、跌停 `w≥w_prev`；alpha 对 frozen/zero/sell_only 均置 0。
+   - 优化域 = 候选池 ∪ 上期持仓（有当日行情票）；真退市票清零归一+告警。
+   > 行情数据在停牌日对价格字段做**前值填充**（volume/amount 为 0），停牌持仓按最近价估值（NAV 不断裂）；冻结口径下优化目标即为"维持持仓"，无需回测引擎延期处理。
 3. **流动性为软惩罚（非硬约束）**：通过 `turnover_penalty` + 个股冲击成本向量（基于 ADV）软性压制换手，未实现 ADV 参与率硬约束。
 4. **求解器**：优先 CLARABEL，失败降级 SCS 兜底。
 5. **收益归因是独立分析层，不进主链路**：`analysis/` 只读消费 `weight_df`（优化产出）

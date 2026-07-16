@@ -14,7 +14,7 @@ dependencies = [
     "pandas>=2.0",
     "pydantic>=2.0",
     "pyyaml",
-    "cvxpy>=1.4",        # 凸优化（顶层 import portfolio_optimizer 即需要）
+    "cvxpy>=1.4",        # 凸优化（顶层 import hqopt 即需要）
     "clarabel>=0.7",     # CLARABEL solver
     "plotly>=5.0",       # HTML 报告
 ]
@@ -27,11 +27,11 @@ dev = [
 ]
 
 [project.scripts]
-hqopt = "portfolio_optimizer.cli:main"
+hqopt = "hqopt.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["portfolio_optimizer*"]
+include = ["hqopt*"]
 
 [tool.ruff]
 line-length = 100

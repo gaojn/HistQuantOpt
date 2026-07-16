@@ -29,8 +29,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 import polars as pl
 
-from portfolio_optimizer.io.data_panel import load_panel
-from portfolio_optimizer.backtest.run import run_backtest
+from hqopt.io.data_panel import load_panel
+from hqopt.backtest.run import run_backtest
 
 # ── 路径配置 ──────────────────────────────────────────────────────
 PROJECT_ROOT     = Path(__file__).resolve().parent.parent

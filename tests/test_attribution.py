@@ -13,9 +13,9 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from portfolio_optimizer.analysis.attribution import ReturnAttributor
-from portfolio_optimizer.risk.attribution_data import FactorReturnLoader
-from portfolio_optimizer.risk.cne6_risk import CNE6RiskModel
+from hqopt.analysis.attribution import ReturnAttributor
+from hqopt.risk.attribution_data import FactorReturnLoader
+from hqopt.risk.cne6_risk import CNE6RiskModel
 
 FACTORS = ["Size", "Country"]
 

@@ -1,7 +1,7 @@
 """hqopt CLI 参数解析与分发测试（不实际跑优化/回测）。"""
 import pytest
 
-from portfolio_optimizer.cli import build_parser
+from hqopt.cli import build_parser
 
 
 def test_run_parses():

@@ -4,7 +4,7 @@ from datetime import date
 import polars as pl
 import pytest
 
-from portfolio_optimizer.data.benchmark import IndexBenchmarkWeights
+from hqopt.data.benchmark import IndexBenchmarkWeights
 
 
 def _make_official(path, index="zz1000"):
@@ -80,3 +80,60 @@ def test_reconstruct_source_ignores_official(tmp_path):
 def test_invalid_source():
     with pytest.raises(ValueError):
         IndexBenchmarkWeights(index="zz1000", source="bad")
+
+
+# ─────────────────────────────────────────────────────────────────
+# T4: _build_weight_matrix ffill 掩码修复
+# ─────────────────────────────────────────────────────────────────
+
+def _make_panel_3stocks():
+    """
+    构造 3 支股票、5 个交易日的小面板：
+    - A, B: 全程在成分内
+    - C: 前 3 天在成分，之后掉出（is_zz500=0）
+    第 2 天 B 停牌（free_mv/total_mv=NaN）用于验证停牌日 ffill 正常工作
+    """
+    dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4),
+             date(2024, 1, 5), date(2024, 1, 8)]
+    rows = []
+    for d in dates:
+        for code, (in5, total_mv, free_mv) in {
+            "A": (1, 100.0, 80.0),
+            "B": (1, 200.0, 160.0),
+            "C": (1 if d <= date(2024, 1, 4) else 0, 50.0, 40.0),  # C 第4天后掉出
+        }.items():
+            # B 在第2天停牌（市值 NaN）
+            if code == "B" and d == date(2024, 1, 3):
+                total_mv_r = None
+                free_mv_r = None
+            else:
+                total_mv_r = total_mv
+                free_mv_r = free_mv
+            rows.append({
+                "code": code, "date": d,
+                "total_mv": total_mv_r, "free_mv": free_mv_r,
+                "is_zz500": in5,
+            })
+    return pl.DataFrame(rows).with_columns(pl.col("date").cast(pl.Date))
+
+
+def test_ffill_respects_roster_boundary():
+    """掉出指数后权重归零；停牌日权重仍在（ffill 正常）。"""
+    panel = _make_panel_3stocks()
+    bm = IndexBenchmarkWeights(index="zz500", panel=panel, source="reconstruct")
+
+    dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4),
+             date(2024, 1, 5), date(2024, 1, 8)]
+    bm.precompute(dates[0], dates[-1])
+
+    # ① 掉出指数后 C 权重应为 0
+    w_after = bm.get_weights(date(2024, 1, 5), tickers=["A", "B", "C"])
+    assert w_after["C"] == pytest.approx(0.0, abs=1e-8), (
+        f"C 掉出指数后权重应为 0，实为 {w_after['C']:.6f}"
+    )
+    assert w_after["A"] + w_after["B"] == pytest.approx(1.0, abs=1e-6)
+
+    # ② 停牌日（B 第2天无市值）权重应仍存在（ffill 使用前一天市值）
+    w_susp = bm.get_weights(date(2024, 1, 3), tickers=["A", "B", "C"])
+    assert w_susp["B"] > 0.0, f"停牌日 B 权重应通过 ffill 保持，实为 {w_susp['B']:.6f}"
+    assert w_susp["A"] + w_susp["B"] + w_susp["C"] == pytest.approx(1.0, abs=1e-6)

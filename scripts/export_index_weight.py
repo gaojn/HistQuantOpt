@@ -3,7 +3,7 @@
 输出长表 parquet：data/index_weight/official_weight.parquet
     列：index(hs300/zz500/zz1000), date(Date), code(成分股), weight(小数，∑≈1)
 
-供 portfolio_optimizer.data.benchmark.IndexBenchmarkWeights 的 source="official"
+供 hqopt.data.benchmark.IndexBenchmarkWeights 的 source="official"
 模式读取（按调仓日 asof 取 ≤当日最近的官方快照；缺数据时回退 free_mv 重构）。
 
 数据为官方**月度/调样快照**（非逐日）。数据源 wind_db（密码走
@@ -43,7 +43,7 @@ def fetch(start: str, end: str) -> pl.DataFrame:
         )
     os.environ["CLICKHOUSE_PASSWORD"] = pwd
     os.environ["CLICKHOUSE_DB"] = "wind_db"
-    from portfolio_optimizer.data.clickhouse_db import query_df
+    from hqopt.data.clickhouse_db import query_df
 
     codes = "','".join(IDX2KEY)
     sql = f"""

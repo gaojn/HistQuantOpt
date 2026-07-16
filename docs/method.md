@@ -1,8 +1,8 @@
 # 组合优化方法
 
 > 本项目两种优化策略的数学模型、约束、默认参数与用法。
-> 对应代码：[`optimizer/alpha_max.py`](../portfolio_optimizer/optimizer/alpha_max.py)（量化多头）、
-> [`optimizer/index_enhance.py`](../portfolio_optimizer/optimizer/index_enhance.py)（指数增强）。
+> 对应代码：[`optimizer/alpha_max.py`](../hqopt/optimizer/alpha_max.py)（量化多头）、
+> [`optimizer/index_enhance.py`](../hqopt/optimizer/index_enhance.py)（指数增强）。
 
 ---
 
@@ -45,7 +45,7 @@ $$
 
 其中 $X$=因子暴露、$F$=因子协方差、$\delta$=特质方差，来自 CNE6 风险面板
 （47 因子 = 16 风格 + Country + 30 中信一级行业，详见 [design.md](design.md) 与
-[`risk/cne6_risk.py`](../portfolio_optimizer/risk/cne6_risk.py)）。
+[`risk/cne6_risk.py`](../hqopt/risk/cne6_risk.py)）。
 L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性与个股特质风险差异。
 
 > **指数增强的基准权重 $w_{bm}$** 默认取指数**官方成分权重**（由 wind_db 导出，
@@ -73,18 +73,28 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 > 风格上限 $S$ 支持标量（统一）或 dict（按因子名分别约束，可带 `default` 兜底）。
 > 因子已 z-score 标准化，$S=1$ 即组合在该因子上加权暴露不超过 ±1σ。
 
-**约束 7 — A 股交易状态**（强制，贴近真实成交）：
+**约束 7 — A 股交易状态**（强制，贴近真实成交，停牌冻结口径）：
 
-| 状态 | 处理 | 说明 |
-|---|---|---|
-| 停牌 SUSPENDED | $w_i=0$ | 无法买卖 |
-| 次新 NEW_LISTING | $w_i=0$ | 上市 < 60 自然日 |
-| ST/*ST | $w_i=0$ | 风险偏高（独立状态） |
-| 涨停 LIMIT_UP | $w_i \le w_{\text{prev},i}$ | 不可加仓 |
-| 跌停 LIMIT_DOWN | $w_i \ge w_{\text{prev},i}$ | 不可减仓 |
+三类互斥掩码，优先级：frozen > sell_only > zero。
 
-禁止持仓的股票同时把 $\alpha_i$ 清零，避免干扰目标函数方向；涨跌停约束需传 `prev_weight`。
-状态判定见 [`RealMarketAdapter._compute_status`](../portfolio_optimizer/data/real_adapter.py)。
+| 条件 | 掩码 | 数学约束 | 说明 |
+|---|---|---|---|
+| 停牌 & 有持仓（$w_{\text{prev},i}>0$） | **frozen** | $w_i = w_{\text{prev},i}$ | 冻结，不计换手、不释放资金 |
+| 停牌/次新/ST & 无持仓 | **zero** | $w_i = 0$ | 禁止开仓 |
+| 掉出候选池的持仓票、次新/ST 有持仓 | **sell_only** | $w_i \le w_{\text{prev},i}$ | 只卖不买，卖出正常计换手与成本 |
+| 涨停 LIMIT_UP | — | $w_i \le w_{\text{prev},i}$ | 不可加仓（与 sell_only 方向相同） |
+| 跌停 LIMIT_DOWN | — | $w_i \ge w_{\text{prev},i}$ | 不可减仓 |
+
+**优化域 = 当期候选池 ∪ 上期持仓（有当日行情的票）**（`filter_universe` 的 `prev_holdings` 参数控制）。
+真退市票（当日 panel 无行情行）无法进优化域，按原有逻辑清零+归一并输出告警日志。
+
+冻结票上界豁免：$W_{\max,i}^{\text{frozen}} = \max(W_{\max}, w_{\text{prev},i})$，避免漂移后持仓超上限导致 infeasible。
+`active_weight_upper`（指增专属）对冻结票同样豁免，仅对非冻结票施加。
+
+alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方向）。
+冻结票因 $w_i = w_{\text{prev},i}$ 等式约束，$|w_i - w_{\text{prev},i}| = 0$，自动不消耗换手预算。
+
+涨跌停约束需传 `prev_weight`；状态判定见 [`RealMarketAdapter._compute_status`](../hqopt/data/real_adapter.py)。
 
 > ⚠️ 行业上限不可行陷阱：若所有行业上限之和 < 100% 则无解
 > （30 个行业 × $I_{\max}$ 须 ≥ 1）。
@@ -95,6 +105,8 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 
 完整模板见 [`configs/alpha_max_default.yaml`](../configs/alpha_max_default.yaml) 与
 [`configs/index_enhance_default.yaml`](../configs/index_enhance_default.yaml)，以下为对照：
+
+> **注**：下表数值来自 YAML 默认配置文件；Python 类（`IndexEnhanceConfig`/`AlphaMaxConfig`）的代码默认值以各类 docstring 为准，两者可能不同（如 `weight_upper`：YAML=0.01，Python 类默认=0.02/0.05）。
 
 | 参数 | 量化多头 | 指数增强 | 含义 |
 |---|---:|---:|---|
@@ -148,13 +160,21 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 
 ## 6. 求解与性能
 
-- **类型**：凸二次规划（QP），求解器 **CLARABEL**（指数增强失败时降级 SCS 兜底）
+- **类型**：凸二次规划（QP），求解器 **CLARABEL**（`max_iter=500`）；两个优化器（`index_enhance`/`alpha_max`）均在 CLARABEL 失败时降级 **SCS**（`max_iters=10000`）兜底
 - **失败处理**：返回 `infeasible`，pipeline 保持上期权重（重新归一）或跳过
 - **数值稳定**：求解后 `clip(0)` + 归一化消除浮点误差
 - **规模**：全市场 ~5000 只（剔北交所+ST）约 1s/期
+- **首个调仓日**：组合日收益固定为 0（首日全仓现金，T+1 才建仓），基准当日有收益，存在一日不对等（对 Sharpe 影响极小，但长期回测首日图形可见跳变）。
+- **risk_aversion 置 0**：显式设 `risk_aversion: 0.0` 将完全关闭风险惩罚项（factor_risk/specific_risk 均不加入目标函数），等价于纯 alpha 最大化；与 `risk_aversion: null`（退回 L2 兜底）行为不同。
 
 **infeasible 常见原因**：成分股下限太高、行业约束太紧（某行业基准权重为 0 时易冲突）、
 首期建仓却设了 `max_turnover`（应传 `None`，pipeline 已自动处理首期）。
+
+**绩效指标口径**（`engine.calc_metrics`）：
+- 年化超额收益采用**几何口径**：`(1+total_port)/(1+total_bm)-1` 后再年化，与 report 年度表、全期行一致。
+- 月度超额收益表采用算术差（月组合收益 − 月基准收益），与年度/全期口径不同，报告中已注明。
+- 跟踪误差（TE）= 超额日收益标准差 × √252（算术，不改口径）。
+- 信息比率 IR = 年化超额收益（几何） / 跟踪误差。
 
 ---
 
@@ -175,15 +195,15 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 
 ## 8. API 用法
 
-逐期批量优化通常直接走 [`pipeline/batch_optimize.py`](../portfolio_optimizer/pipeline/batch_optimize.py)
+逐期批量优化通常直接走 [`pipeline/batch_optimize.py`](../hqopt/pipeline/batch_optimize.py)
 （YAML 驱动，见 [操作指南.md](操作指南.md)）。单期直接调优化器：
 
 **量化多头**
 
 ```python
 from datetime import date
-from portfolio_optimizer.io.data_panel import load_panel
-from portfolio_optimizer import (
+from hqopt.io.data_panel import load_panel
+from hqopt import (
     RealMarketAdapter, CNE6RiskModel, AlphaMaxConfig, AlphaMaxOptimizer,
 )
 
@@ -210,8 +230,8 @@ print(res.summary()); print(res.top_holdings(10))
 **指数增强**
 
 ```python
-from portfolio_optimizer import IndexBenchmarkWeights, IndexEnhanceConfig, IndexEnhanceOptimizer
-from portfolio_optimizer.pipeline.universe import filter_universe
+from hqopt import IndexBenchmarkWeights, IndexEnhanceConfig, IndexEnhanceOptimizer
+from hqopt.pipeline.universe import filter_universe
 
 snap = RealMarketAdapter().build_snapshot_from_panel(panel, target, index="zz1000")
 snap = filter_universe(snap, panel, target)               # 剔北交所+ST
@@ -239,8 +259,8 @@ print(res.style_active_exposure(risk_snap.style_loading()))
 
 ## 9. 收益归因（Return Attribution）
 
-> 对应代码：[`analysis/attribution.py`](../portfolio_optimizer/analysis/attribution.py)、
-> [`risk/attribution_data.py`](../portfolio_optimizer/risk/attribution_data.py)。
+> 对应代码：[`analysis/attribution.py`](../hqopt/analysis/attribution.py)、
+> [`risk/attribution_data.py`](../hqopt/risk/attribution_data.py)。
 > CLI：`hqopt attribute`（见 [操作指南.md](操作指南.md)）。
 
 **动机**：一条超额净值曲线好看，不代表 alpha 干净——可能是优化器偷偷吃了某个

@@ -1,5 +1,5 @@
 """导出因子收益 / 特质收益：从 ClickHouse cne6_risk.factor_return / specific_return
-拉取，供 portfolio_optimizer.analysis.attribution 做收益归因。
+拉取，供 hqopt.analysis.attribution 做收益归因。
 
 输出：
     data/barra_cne6/factor_return.parquet     —— trade_date, factor_name, ret
@@ -13,7 +13,7 @@
 不像 exposure_panel 那样区分 barra_cne6 / barra_cne6_L 两个目录。
 
 数据源：ClickHouse cne6_risk（环境变量 CLICKHOUSE_PASSWORD 必填，
-见 portfolio_optimizer/data/clickhouse_db.py）。
+见 hqopt/data/clickhouse_db.py）。
 
 运行：CLICKHOUSE_PASSWORD=... python scripts/export_factor_attribution.py
 """
@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import polars as pl
 
-from portfolio_optimizer.data.clickhouse_db import query_df
+from hqopt.data.clickhouse_db import query_df
 
 OUT_DIR = Path("data/barra_cne6")
 

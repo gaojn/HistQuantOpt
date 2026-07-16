@@ -34,8 +34,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from portfolio_optimizer.io.data_panel import load_panel
-from portfolio_optimizer.research.signal_grid import (
+from hqopt.io.data_panel import load_panel
+from hqopt.research.signal_grid import (
     SignalGridRunner,
     DEFAULT_IC_LIST, DEFAULT_ICIR_LIST, DEFAULT_DECAY_LIST,
 )

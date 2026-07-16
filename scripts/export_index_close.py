@@ -3,7 +3,7 @@
 输出与 data/指数收盘价信息.csv 同格式（宽表，date 为 YYYYMMDD）：
     date, 沪深300, 中证500, 中证800, 中证1000, 中证全指, 中证红利
 
-供 portfolio_optimizer.data.index_close 作为回测基准读取。
+供 hqopt.data.index_close 作为回测基准读取。
 
 数据源：ClickHouse wind_db（与项目主库 the_quant 同实例、不同库/密码）。
 复用 clickhouse_db.query_df，连接前注入 wind_db 库名与密码：
@@ -54,7 +54,7 @@ def fetch_wide(start: str, end: str) -> pd.DataFrame:
         )
     os.environ["CLICKHOUSE_PASSWORD"] = pwd
     os.environ["CLICKHOUSE_DB"] = "wind_db"
-    from portfolio_optimizer.data.clickhouse_db import query_df
+    from hqopt.data.clickhouse_db import query_df
 
     codes = "','".join(NAME2CODE.values())
     sql = f"""

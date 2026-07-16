@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import polars as pl
 
-from portfolio_optimizer.data.clickhouse_db import query_df
+from hqopt.data.clickhouse_db import query_df
 
 CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "cache"
 

@@ -1,5 +1,5 @@
 """两个 default 配置可加载且字段完整。"""
-from portfolio_optimizer.pipeline.batch_optimize import load_config, _parse_style_bound
+from hqopt.pipeline.batch_optimize import load_config, _parse_style_bound
 
 
 def test_default_configs_load():

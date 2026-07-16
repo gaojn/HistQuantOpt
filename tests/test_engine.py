@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from portfolio_optimizer.backtest.engine import RealisticBacktester, calc_metrics
+from hqopt.backtest.engine import RealisticBacktester, calc_metrics
 
 INIT = 1e8
 
@@ -166,6 +166,45 @@ def test_turnover_recorded_on_execution():
     assert result.turnover.iloc[0] > 0.0
 
 
+# ── XD/XR/N 不被引擎误拦 ─────────────────────────────────────────
+
+
+def test_xd_xr_n_tradable_not_blocked():
+    """XD/XR/N 日股票可正常成交，引擎不应拦截买入。"""
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    tickers = ["A", "B"]
+    frames = _frames(dates, tickers)
+    # A 在 T+1 执行日为 XD 状态（除息，但可正常买入）
+    frames["trade_status"].loc[dates[1], "A"] = "XD"
+    # 价格正常，不触涨跌停
+    weight_df = pd.DataFrame({"A": [0.8], "B": [0.2]}, index=dates[:1])
+    result, stats = _run(weight_df, frames)
+    # XD 日不应被拦截，buy_fail_count 应为 0
+    assert stats["buy_fail_count"] == 0
+    # 建仓完成后 NAV 约为 0.999（扣买入费率）
+    assert result.nav.iloc[1] == pytest.approx(0.999, abs=2e-3)
+
+
+# ── 停牌阻断卖出 ─────────────────────────────────────────────────
+
+
+def test_suspension_blocks_sell():
+    """持仓股停牌时无法卖出，应进延期队列。"""
+    dates = pd.bdate_range("2024-01-02", periods=6)
+    tickers = ["A", "B"]
+    frames = _frames(dates, tickers)
+    # day0 先建仓 A:0.5 B:0.5；day2 信号清仓 B；day3 执行但 B 停牌
+    sell_day = dates[3]
+    frames["trade_status"].loc[sell_day, "B"] = "停牌"
+    weight_df = pd.DataFrame(
+        {"A": [0.5, 1.0], "B": [0.5, 0.0]},
+        index=[dates[0], dates[2]],
+    )
+    _, stats = _run(weight_df, frames)
+    # B 停牌无法卖出 → 进延期队列
+    assert stats["sell_defer_count"] >= 1
+
+
 def test_calc_metrics_constant_returns():
     """恒定正收益：年化为正、Sharpe 为正、回撤≈0。"""
     idx = pd.bdate_range("2024-01-02", periods=252)
@@ -177,4 +216,5 @@ def test_calc_metrics_constant_returns():
     assert m.annual_return == pytest.approx((1.001) ** 252 - 1, rel=1e-6)
     assert m.sharpe > 0
     assert m.max_drawdown <= 1e-9
-    assert m.annual_excess_return == pytest.approx(0.001 * 252, rel=1e-6)
+    # 几何超额（bm=0 时等于组合年化收益）
+    assert m.annual_excess_return == pytest.approx((1.001) ** 252 - 1, rel=1e-4)
