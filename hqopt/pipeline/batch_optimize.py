@@ -113,7 +113,13 @@ def run_batch_optimize(
     if alpha_df is not None:
         logger.info("\n[2] 使用预加载 Alpha 矩阵")
     else:
-        alpha_source = alpha_cfg.get("source", "synthetic")
+        if "source" not in alpha_cfg:
+            raise ValueError(
+                "配置缺少 alpha.source 字段。必须显式指定 'file'（外部真实/DLF alpha）"
+                "或 'synthetic'（含未来信息的标定用合成因子，仅供流程验证，"
+                "回测业绩不可信）——不接受默认兜底，防止漏配时误用前视信号。"
+            )
+        alpha_source = alpha_cfg["source"]
         if alpha_source == "file":
             logger.info(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
             alpha_df = load_alpha_panel(alpha_cfg["path"])
