@@ -7,12 +7,18 @@ on:
 
 jobs:
   test:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.14.6 是主运行环境；3.12 保留兼容性门禁。
+        python-version: ["3.14.6", "3.12"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install
         run: |
           python -m pip install --upgrade pip

@@ -10,6 +10,7 @@ def test_default_configs_load():
         cfg = load_config(path)
         assert cfg["strategy"] == strat
         assert "execution" in cfg
+        assert cfg["alpha"]["synthetic"] is True
         for k in ("start_date", "end_date", "rebalance_freq", "initial_value"):
             assert k in cfg["backtest"]
         assert "weight_upper" in cfg["optimizer"]

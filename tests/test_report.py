@@ -79,3 +79,19 @@ def test_generate_html_report_includes_turnover_summary(tmp_path: Path):
 
     yearly = pd.read_parquet(tmp_path / "report_data" / "yearly.parquet")
     assert {"rebalance_count", "turnover", "avg_turnover"}.issubset(yearly.columns)
+
+
+def test_generate_html_report_renders_escaped_warning_banner(tmp_path: Path):
+    out = tmp_path / "report.html"
+
+    generate_html_report(
+        _result(),
+        output_path=out,
+        warning_banner="含未来信息，回测业绩完全不可信\n<script>alert(1)</script>",
+    )
+
+    html = out.read_text(encoding="utf-8")
+    assert 'class="warning-banner"' in html
+    assert "含未来信息，回测业绩完全不可信" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html

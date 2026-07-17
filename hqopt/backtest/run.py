@@ -16,10 +16,18 @@ import polars as pl
 
 from hqopt.backtest.engine import RealisticBacktester
 from hqopt.backtest.report import generate_html_report
+from hqopt.constants import SYNTHETIC_ALPHA_WARNING_FILE
 from hqopt.data.index_close import load_index_returns
 from hqopt.io.data_panel import load_panel
 
 logger = logging.getLogger(__name__)
+
+
+def _load_warning_banner(weight_path: str | Path) -> str | None:
+    warning_path = Path(weight_path).parent / SYNTHETIC_ALPHA_WARNING_FILE
+    if not warning_path.exists():
+        return None
+    return warning_path.read_text(encoding="utf-8").strip() or None
 
 
 def _load_weights(path: str | Path) -> pd.DataFrame:
@@ -98,6 +106,7 @@ def run_backtest(
     ]
     if weight_df.empty:
         raise ValueError(f"权重文件在 {t1}~{t2} 无数据，请检查日期区间")
+    warning_banner = _load_warning_banner(weight_path)
 
     actual_start = weight_df.index.min().date()
     actual_end = weight_df.index.max().date()
@@ -162,6 +171,7 @@ def run_backtest(
         report_title = title or f"回测报告  {index.upper()}基准  {actual_start}~{actual_end}"
         report_path = generate_html_report(
             result, output_path=out_path / "report.html", title=report_title,
+            warning_banner=warning_banner,
         )
         logger.info(f"\n  HTML 报告：{report_path}")
         nav_df = pd.DataFrame({

@@ -333,6 +333,32 @@ def test_nested_output_directory_is_created(tmp_path, monkeypatch):
     assert output.exists()
 
 
+def test_file_alpha_marked_synthetic_writes_and_clears_warning(
+    tmp_path, monkeypatch, caplog
+):
+    """文件型合成 Alpha 也必须落地水印；真实 Alpha 成功覆盖后清除旧水印。"""
+    optimizer = _RecordingOptimizer()
+    monkeypatch.setattr(batch, "CNE6RiskModel", _FakeRiskModel)
+    monkeypatch.setattr(batch, "AlphaMaxOptimizer", lambda config: optimizer)
+    config = _alpha_config(tmp_path)
+    config["alpha"]["synthetic"] = True
+    alpha = pd.DataFrame(
+        {"A": [1.0, 1.0], "B": [0.0, 0.0]},
+        index=pd.to_datetime(["2024-01-02", "2024-01-04"]),
+    )
+
+    batch.run_batch_optimize(config, panel=_panel(), alpha_df=alpha)
+
+    warning = tmp_path / batch.SYNTHETIC_ALPHA_WARNING_FILE
+    assert warning.exists()
+    assert "回测业绩完全不可信" in warning.read_text(encoding="utf-8")
+    assert any("合成 Alpha 警告" in message for message in caplog.messages)
+
+    config["alpha"]["synthetic"] = False
+    batch.run_batch_optimize(config, panel=_panel(), alpha_df=alpha)
+    assert not warning.exists()
+
+
 def _alpha_config(tmp_path) -> dict:
     return {
         "strategy": "alpha_max",

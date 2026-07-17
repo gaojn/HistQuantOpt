@@ -22,6 +22,10 @@ import yaml
 from hqopt.data.benchmark import IndexBenchmarkWeights
 from hqopt.data.real_adapter import RealMarketAdapter
 from hqopt.backtest.execution import ExecutionLedger
+from hqopt.constants import (
+    SYNTHETIC_ALPHA_WARNING_FILE,
+    SYNTHETIC_ALPHA_WARNING_TEXT,
+)
 from hqopt.io.data_panel import load_panel
 from hqopt.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from hqopt.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
@@ -91,6 +95,14 @@ def _optional_float(config: dict[str, Any], key: str) -> float | None:
     """解析可空数值配置；显式 0.0 必须保留。"""
     value = config.get(key)
     return None if value is None else float(value)
+
+
+def _synthetic_alpha_enabled(alpha_cfg: dict[str, Any]) -> bool:
+    """返回 Alpha 是否含前视；文件型 Alpha 也必须通过 synthetic 显式声明。"""
+    synthetic = alpha_cfg.get("synthetic", False)
+    if not isinstance(synthetic, bool):
+        raise ValueError("alpha.synthetic 必须是布尔值 true/false")
+    return synthetic or alpha_cfg.get("source") == "synthetic"
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -166,6 +178,7 @@ def run_batch_optimize(
         logger.info(f"\n[1] 使用预加载行情数据  交易日={panel['date'].n_unique()}  股票={panel['code'].n_unique()}")
 
     # ── Alpha ────────────────────────────────────────────────
+    synthetic_alpha = _synthetic_alpha_enabled(alpha_cfg)
     if alpha_df is not None:
         logger.info("\n[2] 使用预加载 Alpha 矩阵")
     else:
@@ -185,15 +198,6 @@ def run_batch_optimize(
             logger.info(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
             alpha_df = load_alpha_panel(alpha_cfg["path"])
         else:
-            _SYNTHETIC_WARNING = (
-                "\n" + "=" * 70 + "\n"
-                "  ⚠️  合成 Alpha 警告\n"
-                "  当前使用含前视信息的合成信号（build_synthetic_alpha）。\n"
-                "  该信号以未来 N 日收益构造，回测业绩完全不可信。\n"
-                "  绝不可用于实盘或对外披露业绩！\n"
-                + "=" * 70
-            )
-            logger.warning(_SYNTHETIC_WARNING)
             alpha_df = build_synthetic_alpha(
                 panel,
                 fwd_days=int(alpha_cfg["fwd_days"]),
@@ -202,14 +206,13 @@ def run_batch_optimize(
                 decay=float(alpha_cfg["decay"]),
                 seed=int(alpha_cfg["seed"]),
             )
-            # 在输出目录写水印文件，防止误用前视产出
-            out_dir = Path(out_cfg["weights"]).parent
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "SYNTHETIC_ALPHA_WARNING.txt").write_text(
-                "本目录下的权重文件使用了含前视信息的合成 Alpha 信号生成，\n"
-                "回测业绩完全不可信，绝不可用于实盘或对外披露。\n",
-                encoding="utf-8",
-            )
+    if synthetic_alpha:
+        logger.warning(
+            "\n%s\n  ⚠️  合成 Alpha 警告\n  %s%s",
+            "=" * 70,
+            SYNTHETIC_ALPHA_WARNING_TEXT.replace("\n", "\n  "),
+            "=" * 70,
+        )
     logger.info(f"  Alpha 矩阵: {alpha_df.shape}  日期 {alpha_df.index.min().date()}~{alpha_df.index.max().date()}")
 
     # ── 再平衡日 ─────────────────────────────────────────────
@@ -473,6 +476,11 @@ def run_batch_optimize(
     out_path = Path(out_cfg["weights"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     weight_df.to_parquet(out_path)
+    warning_path = out_path.parent / SYNTHETIC_ALPHA_WARNING_FILE
+    if synthetic_alpha:
+        warning_path.write_text(SYNTHETIC_ALPHA_WARNING_TEXT, encoding="utf-8")
+    else:
+        warning_path.unlink(missing_ok=True)
     logger.info(f"\n  权重矩阵已保存：{out_path}")
     logger.info(f"\n{'='*65}\n")
 

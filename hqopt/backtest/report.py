@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -597,6 +598,11 @@ _CSS = """
   .container { max-width: 1300px; margin: 0 auto; }
   h1 { margin: 0 0 4px 0; font-weight: 600; color: #2c3e50; }
   .subtitle { color: #7f8c8d; margin-bottom: 24px; font-size: 13px; }
+  .warning-banner {
+    background: #fff3cd; border: 2px solid #d97706; color: #7c2d12;
+    border-radius: 8px; padding: 14px 16px; margin: 0 0 20px 0;
+    font-size: 16px; font-weight: 700; line-height: 1.6;
+  }
   .section {
     background: #fff; border-radius: 8px; padding: 20px;
     margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
@@ -659,6 +665,7 @@ def generate_html_report(
     output_path: Path | str = "output/backtest_report.html",
     title: str = "量化多头组合回测报告",
     subtitle: str | None = None,
+    warning_banner: str | None = None,
 ) -> Path:
     """
     生成回测 HTML 报告。
@@ -673,6 +680,8 @@ def generate_html_report(
         报告标题
     subtitle : str | None
         副标题，默认显示回测时间区间
+    warning_banner : str | None
+        需要置顶展示的风险水印；例如含未来信息的合成 Alpha 警告
 
     Returns
     -------
@@ -696,6 +705,10 @@ def generate_html_report(
     monthly_table   = _build_monthly_excess_table(result)
     turnover_chart  = _make_turnover_chart(result)
     turnover_card   = _build_turnover_card(result)
+    warning_html = ""
+    if warning_banner:
+        safe_warning = escape(warning_banner).replace("\n", "<br>")
+        warning_html = f'<div class="warning-banner">⚠️ {safe_warning}</div>'
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -708,6 +721,7 @@ def generate_html_report(
   <div class="container">
     <h1>{title}</h1>
     <div class="subtitle">{subtitle}</div>
+    {warning_html}
 
     <div class="section">
       <h2>总体绩效</h2>

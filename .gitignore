@@ -3,6 +3,7 @@
 /data/
 /output/
 /alphas/
+/data_bundle.lock.json
 
 # Python
 __pycache__/

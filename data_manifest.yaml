@@ -1,0 +1,189 @@
+manifest_version: 1
+bundle_name: HistQuantOpt research data
+supported_python:
+  - "3.12"
+  - "3.14.6"
+
+column_sets:
+  cne6_factors:
+    - Size
+    - MidCap
+    - Beta
+    - Momentum
+    - ResidualVolatility
+    - LongTermReversal
+    - Liquidity
+    - Value
+    - EarningsYield
+    - Growth
+    - Profitability
+    - InvestmentQuality
+    - EarningsQuality
+    - EarningsVariability
+    - Leverage
+    - DividendYield
+    - Country
+    - 交通运输
+    - 传媒
+    - 农林牧渔
+    - 医药
+    - 商贸零售
+    - 国防军工
+    - 基础化工
+    - 家电
+    - 建材
+    - 建筑
+    - 房地产
+    - 有色金属
+    - 机械
+    - 汽车
+    - 消费者服务
+    - 煤炭
+    - 电力及公用事业
+    - 电力设备及新能源
+    - 电子
+    - 石油石化
+    - 纺织服装
+    - 综合
+    - 综合金融
+    - 计算机
+    - 轻工制造
+    - 通信
+    - 钢铁
+    - 银行
+    - 非银行金融
+    - 食品饮料
+
+profiles:
+  default:
+    description: 两套默认策略的优化、回测和报告
+    assets:
+      - market_cache
+      - cne6s_exposure
+      - cne6s_covariance
+      - index_close
+      - index_weight
+      - default_alpha
+  attribution:
+    description: 默认策略及收益归因
+    assets:
+      - market_cache
+      - cne6s_exposure
+      - cne6s_covariance
+      - factor_return
+      - specific_return
+      - index_close
+      - index_weight
+      - default_alpha
+  long_risk:
+    description: 使用 CNE6L 长周期风险面板运行默认策略
+    assets:
+      - market_cache
+      - cne6l_exposure
+      - cne6l_covariance
+      - index_close
+      - index_weight
+      - default_alpha
+
+assets:
+  market_cache:
+    path_template: data/cache/ashare_daily_{year}.parquet
+    values:
+      year: [2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    format: parquet
+    required_columns:
+      - code
+      - date
+      - adj_open
+      - adj_close
+      - adj_vwap
+      - trade_status
+      - limit_up
+      - limit_down
+      - free_mv
+      - industry_l1
+      - list_days
+      - is_hs300
+      - is_zz500
+      - is_zz1000
+      - is_st
+    date_column: date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  cne6s_exposure:
+    path: data/barra_cne6/exposure_panel.parquet
+    format: parquet
+    required_columns: [rebal_date, code, spec_var]
+    required_column_sets: [cne6_factors]
+    date_column: rebal_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  cne6s_covariance:
+    path: data/barra_cne6/factor_cov_panel.parquet
+    format: parquet
+    required_columns: [rebal_date, factor]
+    required_column_sets: [cne6_factors]
+    date_column: rebal_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  cne6l_exposure:
+    path: data/barra_cne6_L/exposure_panel.parquet
+    format: parquet
+    required_columns: [rebal_date, code, spec_var]
+    required_column_sets: [cne6_factors]
+    date_column: rebal_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  cne6l_covariance:
+    path: data/barra_cne6_L/factor_cov_panel.parquet
+    format: parquet
+    required_columns: [rebal_date, factor]
+    required_column_sets: [cne6_factors]
+    date_column: rebal_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  factor_return:
+    path: data/barra_cne6/factor_return.parquet
+    format: parquet
+    required_columns: [trade_date, factor_name, ret]
+    date_column: trade_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  specific_return:
+    path: data/barra_cne6/specific_return.parquet
+    format: parquet
+    required_columns: [trade_date, code, u]
+    date_column: trade_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  index_close:
+    path: data/指数收盘价信息.csv
+    format: csv
+    required_columns: [date, 沪深300, 中证500, 中证800, 中证1000, 中证全指, 中证红利]
+    date_column: date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  index_weight:
+    path: data/index_weight/official_weight.parquet
+    format: parquet
+    required_columns: [index, date, code, weight]
+    date_column: date
+    required_start: "2020-01-31"
+    required_end: "2026-05-01"
+
+  default_alpha:
+    path: alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet
+    format: parquet
+    required_columns: [date, code, alpha]
+    date_column: date
+    required_start: "2020-01-02"
+    required_end: "2026-05-22"
+    synthetic: true

@@ -32,14 +32,20 @@ _DATA_SCRIPTS = {
 }
 
 
+def _override_alpha_file(cfg: dict, alpha_file: str | None) -> None:
+    """CLI 显式替换 Alpha 时按真实外部信号处理；合成文件应改 YAML 声明。"""
+    if alpha_file:
+        cfg["alpha"]["source"] = "file"
+        cfg["alpha"]["path"] = alpha_file
+        cfg["alpha"]["synthetic"] = False
+
+
 def cmd_optimize(args: argparse.Namespace) -> None:
     from hqopt.pipeline.batch_optimize import load_config, run_batch_optimize
     cfg = load_config(args.config)
     if args.output:
         cfg["output"]["weights"] = args.output
-    if args.alpha_file:
-        cfg["alpha"]["source"] = "file"
-        cfg["alpha"]["path"] = args.alpha_file
+    _override_alpha_file(cfg, args.alpha_file)
     if args.risk_aversion is not None:
         cfg["optimizer"]["risk_aversion"] = args.risk_aversion
     run_batch_optimize(cfg)
@@ -63,9 +69,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     from hqopt.backtest.run import run_backtest
 
     cfg = load_config(args.config)
-    if args.alpha_file:
-        cfg["alpha"]["source"] = "file"
-        cfg["alpha"]["path"] = args.alpha_file
+    _override_alpha_file(cfg, args.alpha_file)
 
     strategy = cfg["strategy"]
     bench = (

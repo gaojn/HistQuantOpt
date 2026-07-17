@@ -1,6 +1,6 @@
 # ============================================================================
 # 量化选股（alpha_max）默认配置
-#   全市场选股、最大化 alpha，CNE6 因子风险约束。run_alpha_max_demo.py 跑此档。
+#   全市场选股、最大化 alpha，CNE6 因子风险约束。hqopt run 跑此档。
 #   参数依据见 docs/method.md（§4 默认参数、§5 风格约束建议）。
 # ============================================================================
 strategy: alpha_max
@@ -39,6 +39,7 @@ optimizer:
 
 alpha:
   source: file
+  synthetic: true            # 文件本身由未来收益构造；强制终端/目录/HTML 三重水印
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
   path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
 

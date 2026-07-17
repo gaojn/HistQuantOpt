@@ -1,7 +1,7 @@
 """hqopt CLI 参数解析与分发测试（不实际跑优化/回测）。"""
 import pytest
 
-from hqopt.cli import build_parser
+from hqopt.cli import _override_alpha_file, build_parser
 
 
 def test_run_parses():
@@ -18,6 +18,18 @@ def test_optimize_overrides():
     assert args.cmd == "optimize"
     assert args.risk_aversion == 12.0
     assert args.output == "w.parquet"
+
+
+def test_alpha_file_override_clears_default_synthetic_flag():
+    cfg = {"alpha": {"source": "file", "path": "synthetic.parquet", "synthetic": True}}
+
+    _override_alpha_file(cfg, "real_alpha.parquet")
+
+    assert cfg["alpha"] == {
+        "source": "file",
+        "path": "real_alpha.parquet",
+        "synthetic": False,
+    }
 
 
 def test_backtest_requires_weights():
