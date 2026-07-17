@@ -1,13 +1,15 @@
-"""从 ClickHouse ``the_quant`` 同步行情 → ``data/cache/ashare_daily_<year>.parquet``。
+"""从 ClickHouse ``wind_db.VW_ASHARE_STOCK_DAILY`` 同步行情 → ``data/cache/ashare_daily_<year>.parquet``。
 
-口径与既有缓存严格一致（40 列，1:1 复刻 ``vw_ashare_daily_backtest`` 视图）：
+源视图变更（2026-07-17）：旧 ``the_quant.vw_ashare_daily_backtest``（小写字段）已从服务器
+下线，改用 ``wind_db.VW_ASHARE_STOCK_DAILY``（字段全大写），涨停价=S_DQ_LIMIT、
+跌停价=S_DQ_STOPPING、vwap=S_DQ_AVGPRICE。缓存口径与既有文件严格一致（40 列不变）：
 行业=中信(CITICS)、复权=后复权、trade_status=中文字符串、单位口径不变。
 delist_date '20991231'→保留原值、free_mv=close×free_shares、
 list_days=自上市日历日数、adj_vwap=vwap×adj_factor。
 
-用法：
-    CLICKHOUSE_PASSWORD=... python scripts/sync_ashare_cache.py            # 默认: 当年
-    CLICKHOUSE_PASSWORD=... python scripts/sync_ashare_cache.py --years 2025 2026
+用法（单一只读凭证，覆盖全部库）：
+    CLICKHOUSE_WIND_PASSWORD=... python scripts/sync_ashare_cache.py            # 默认: 当年
+    CLICKHOUSE_WIND_PASSWORD=... python scripts/sync_ashare_cache.py --years 2025 2026
 """
 
 from __future__ import annotations
@@ -27,29 +29,45 @@ CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "cache"
 
 PRICE_SELECT = """
 SELECT
-  code,
-  trade_dt                AS date,
-  name,
-  preclose                AS pre_close,
-  open, high, low, close,
-  limit_up, limit_down, pct_change, volume, amount,
-  adj_preclose            AS adj_pre_close,
-  adj_open, adj_high, adj_low, adj_close, adj_factor,
-  trade_status,
-  avg_price               AS vwap,
-  total_mv, float_mv,
-  turn                    AS turnover,
-  free_turnover, total_shares, float_shares, free_shares,
-  citics_l1               AS industry_l1,
-  citics_l2               AS industry_l2,
-  citics_l3               AS industry_l3,
-  list_date, delist_date,
-  in_hs300                AS is_hs300,
-  in_zz500                AS is_zz500,
-  in_zz1000               AS is_zz1000,
-  in_st                   AS is_st
-FROM vw_ashare_daily_backtest
-WHERE trade_dt >= '{y}-01-01' AND trade_dt <= '{y}-12-31'
+  S_INFO_WINDCODE         AS code,
+  TRADE_DT                AS date,
+  S_INFO_NAME             AS name,
+  S_DQ_PRECLOSE           AS pre_close,
+  S_DQ_OPEN               AS open,
+  S_DQ_HIGH               AS high,
+  S_DQ_LOW                AS low,
+  S_DQ_CLOSE              AS close,
+  S_DQ_LIMIT              AS limit_up,
+  S_DQ_STOPPING           AS limit_down,
+  S_DQ_PCTCHANGE          AS pct_change,
+  S_DQ_VOLUME             AS volume,
+  S_DQ_AMOUNT             AS amount,
+  S_DQ_ADJPRECLOSE        AS adj_pre_close,
+  S_DQ_ADJOPEN            AS adj_open,
+  S_DQ_ADJHIGH            AS adj_high,
+  S_DQ_ADJLOW             AS adj_low,
+  S_DQ_ADJCLOSE           AS adj_close,
+  S_DQ_ADJFACTOR          AS adj_factor,
+  S_DQ_TRADESTATUS        AS trade_status,
+  S_DQ_AVGPRICE           AS vwap,
+  S_VAL_MV                AS total_mv,
+  S_DQ_MV                 AS float_mv,
+  S_DQ_TURN               AS turnover,
+  S_DQ_FREETURNOVER       AS free_turnover,
+  TOT_SHR_TODAY           AS total_shares,
+  FLOAT_A_SHR_TODAY       AS float_shares,
+  FREE_SHARES_TODAY       AS free_shares,
+  CITICS_IND_NAME_L1      AS industry_l1,
+  CITICS_IND_NAME_L2      AS industry_l2,
+  CITICS_IND_NAME_L3      AS industry_l3,
+  S_INFO_LISTDATE         AS list_date,
+  S_INFO_DELISTDATE       AS delist_date,
+  IN_HS300                AS is_hs300,
+  IN_ZZ500                AS is_zz500,
+  IN_ZZ1000               AS is_zz1000,
+  IS_ST                   AS is_st
+FROM wind_db.VW_ASHARE_STOCK_DAILY
+WHERE TRADE_DT >= '{y}-01-01' AND TRADE_DT <= '{y}-12-31'
 """
 
 # 原 ashare_daily 缓存 40 列顺序（严格复刻，保证下游任何脚本不缺列）

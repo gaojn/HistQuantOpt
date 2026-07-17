@@ -7,9 +7,10 @@ HTTP 接口 + ``FORMAT Parquet`` → polars，零额外依赖（标准库 urllib
 |---|---|---|
 | ``CLICKHOUSE_HOST`` | ``124.222.224.45`` | 主机 |
 | ``CLICKHOUSE_PORT`` | ``18123`` | HTTP 端口 |
-| ``CLICKHOUSE_DB``   | ``the_quant`` | 库名 |
+| ``CLICKHOUSE_DB``   | ``the_quant`` | 库名（SQL 里写 ``库名.表名`` 可跨库，无需切换） |
 | ``CLICKHOUSE_USER`` | ``dw_player`` | 只读账号 |
-| ``CLICKHOUSE_PASSWORD`` | —（**必填**） | 只读密码，仅环境变量 |
+| ``CLICKHOUSE_WIND_PASSWORD`` | —（**必填**） | 只读密码，仅环境变量；2026-07-10 起服务端凭证已合并，单一密码覆盖全部库（wind_db/the_quant/cne6_risk/...） |
+| ``CLICKHOUSE_PASSWORD`` | — | 旧变量名，仍兼容（优先级高于上者） |
 
 用法::
 
@@ -34,18 +35,20 @@ DEFAULTS = {
     "db": "the_quant",
     "user": "dw_player",
 }
-PWD_ENV = "CLICKHOUSE_PASSWORD"
+PWD_ENV = "CLICKHOUSE_PASSWORD"          # 旧变量名，优先读取（向后兼容）
+PWD_ENV_UNIFIED = "CLICKHOUSE_WIND_PASSWORD"  # 合并后的单一凭证（覆盖全部库）
 _TIMEOUT = 600  # 单次查询上限（秒）；按年拉行情足够
 
 _FORMAT_RE = re.compile(r"\bFORMAT\s+\w+\s*$", re.IGNORECASE)
 
 
 def _cfg() -> dict:
-    pwd = os.environ.get(PWD_ENV)
+    pwd = os.environ.get(PWD_ENV) or os.environ.get(PWD_ENV_UNIFIED)
     if not pwd:
         raise RuntimeError(
-            f"请设置环境变量 {PWD_ENV}（ClickHouse 只读密码，绝不入代码/git）。\n"
-            f"  export {PWD_ENV}='...'\n"
+            f"请设置环境变量 {PWD_ENV_UNIFIED}（ClickHouse 只读密码，绝不入代码/git；"
+            f"单一凭证覆盖全部库，旧变量 {PWD_ENV} 仍兼容）。\n"
+            f"  export {PWD_ENV_UNIFIED}='...'\n"
             f"  其余可选: CLICKHOUSE_HOST/PORT/DB/USER（默认 the_quant/dw_player）"
         )
     return {
@@ -95,4 +98,4 @@ def ping() -> str:
     return df.item(0, "v") if df.height else "?"
 
 
-__all__ = ["query_df", "ping", "PWD_ENV", "DEFAULTS"]
+__all__ = ["query_df", "ping", "PWD_ENV", "PWD_ENV_UNIFIED", "DEFAULTS"]

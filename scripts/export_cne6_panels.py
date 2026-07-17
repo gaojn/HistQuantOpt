@@ -14,10 +14,10 @@ exposure 取自 cne6_risk.factor_exposure 的 zscore，按 univ_flag==1 过滤�
 data/cache/ashare_daily_<year>.parquet 的 industry_l1（中信一级）做 one-hot
 （""/"未知" 不计入 30 个行业因子，对应股票当日行业暴露为全 0）。
 
-数据源：ClickHouse the_quant.cne6_risk（环境变量 CLICKHOUSE_PASSWORD 必填，
+数据源：ClickHouse cne6_risk（环境变量 CLICKHOUSE_WIND_PASSWORD 必填，单一凭证覆盖全部库，
 见 hqopt/data/clickhouse_db.py）。
 
-运行：CLICKHOUSE_PASSWORD=... python scripts/export_cne6_panels.py
+运行：CLICKHOUSE_WIND_PASSWORD=... python scripts/export_cne6_panels.py
 """
 
 from __future__ import annotations

@@ -12,10 +12,10 @@
 协方差 F 与特质方差 δ 的估计窗口，不影响已实现的 f、u），因此只导出一份，
 不像 exposure_panel 那样区分 barra_cne6 / barra_cne6_L 两个目录。
 
-数据源：ClickHouse cne6_risk（环境变量 CLICKHOUSE_PASSWORD 必填，
+数据源：ClickHouse cne6_risk（环境变量 CLICKHOUSE_WIND_PASSWORD 必填，单一凭证覆盖全部库，
 见 hqopt/data/clickhouse_db.py）。
 
-运行：CLICKHOUSE_PASSWORD=... python scripts/export_factor_attribution.py
+运行：CLICKHOUSE_WIND_PASSWORD=... python scripts/export_factor_attribution.py
 """
 
 from __future__ import annotations
