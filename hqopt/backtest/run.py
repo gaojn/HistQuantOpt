@@ -7,20 +7,48 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import polars as pl
 
 from hqopt.backtest.engine import RealisticBacktester
+from hqopt.backtest.execution import (
+    align_sell_only_matrix,
+    bundle_io_lock,
+    ensure_bundle_not_in_progress,
+    normalize_sell_only_matrix,
+    sell_only_manifest_path_for_weights,
+    sell_only_path_for_weights,
+    validate_sell_only_manifest,
+)
 from hqopt.backtest.report import generate_html_report
 from hqopt.constants import SYNTHETIC_ALPHA_WARNING_FILE
 from hqopt.data.index_close import load_index_returns
 from hqopt.io.data_panel import load_panel
 
 logger = logging.getLogger(__name__)
+
+
+def _save_execution_stats(stats: dict[str, Any], path: str | Path) -> Path:
+    """把执行统计以可审计 JSON 落盘。"""
+    output_path = Path(path)
+    output_path.write_text(
+        json.dumps(
+            stats,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            default=lambda value: value.item(),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return output_path
 
 
 def _load_warning_banner(weight_path: str | Path) -> str | None:
@@ -41,6 +69,51 @@ def _load_weights(path: str | Path) -> pd.DataFrame:
         df = df.sort_index()
     df.index.name = "date"
     return df
+
+
+def _load_sell_only_metadata(weight_path: str | Path) -> pd.DataFrame | None:
+    """读取优化阶段输出的只卖不买矩阵；外部权重无旁路文件时返回 None。"""
+    ensure_bundle_not_in_progress(weight_path)
+    path = sell_only_path_for_weights(weight_path)
+    if not path.exists():
+        manifest = sell_only_manifest_path_for_weights(weight_path)
+        if manifest.exists():
+            validate_sell_only_manifest(weight_path)
+        return None
+    validate_sell_only_manifest(weight_path)
+    frame = pd.read_parquet(path)
+    return normalize_sell_only_matrix(
+        frame,
+        context=f"sell-only 元数据 {path}：",
+    )
+
+
+def _load_execution_bundle(
+    weight_path: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """在同一共享锁内连续读取权重及其 sell-only 元数据。"""
+    with bundle_io_lock(weight_path, exclusive=False):
+        sell_only_metadata = _load_sell_only_metadata(weight_path)
+        weight_df = _load_weights(weight_path)
+    return weight_df, sell_only_metadata
+
+
+def _align_sell_only_metadata(
+    metadata: pd.DataFrame | None,
+    weight_df: pd.DataFrame,
+    weight_path: str | Path,
+) -> pd.DataFrame | None:
+    """严格绑定权重与 sell-only 元数据，避免错位时静默放开交易限制。"""
+    metadata_path = sell_only_path_for_weights(weight_path)
+    if metadata is None:
+        logger.warning(
+            "  未找到只卖元数据：%s；按外部权重模式执行，不推断 sell-only 限制",
+            metadata_path,
+        )
+        return None
+
+    logger.info("  已加载只卖元数据：%s", metadata_path)
+    return align_sell_only_matrix(metadata, weight_df)
 
 
 def _to_wide(panel: pl.DataFrame, col: str) -> pd.DataFrame:
@@ -100,12 +173,20 @@ def run_backtest(
 
     # ── 1. 权重 ──────────────────────────────────────────────
     logger.info(f"\n[1] 加载权重：{weight_path}")
-    weight_df = _load_weights(weight_path)
-    weight_df = weight_df[
-        (weight_df.index >= pd.Timestamp(t1)) & (weight_df.index <= pd.Timestamp(t2))
+    all_weight_df, sell_only_metadata = _load_execution_bundle(weight_path)
+    weight_df = all_weight_df[
+        (all_weight_df.index >= pd.Timestamp(t1))
+        & (all_weight_df.index <= pd.Timestamp(t2))
     ]
     if weight_df.empty:
         raise ValueError(f"权重文件在 {t1}~{t2} 无数据，请检查日期区间")
+    sell_only_df = _align_sell_only_metadata(
+        sell_only_metadata,
+        all_weight_df,
+        weight_path,
+    )
+    if sell_only_df is not None:
+        sell_only_df = sell_only_df.loc[weight_df.index]
     warning_banner = _load_warning_banner(weight_path)
 
     actual_start = weight_df.index.min().date()
@@ -149,12 +230,15 @@ def run_backtest(
         weight_df=weight_df, adj_close=adj_close_w, adj_vwap=adj_vwap_w,
         close_raw=close_raw_w, limit_up_df=limit_up_w, limit_down_df=limit_down_w,
         trade_status_df=trade_status_w, benchmark_ret=bm_ret, initial_value=initial_value,
+        sell_only_df=sell_only_df,
     )
 
     logger.info(f"\n{result.summary()}")
     logger.info(
-        f"\n  执行统计：涨停买入失败={exec_stats['buy_fail_count']}次  "
-        f"跌停延迟卖出={exec_stats['sell_defer_count']}次  "
+        f"\n  执行统计：买入阻断={exec_stats['buy_fail_count']}次  "
+        f"卖出阻断={exec_stats['sell_defer_count']}次  "
+        f"过期订单={exec_stats['expired_order_count']}笔  "
+        f"过期未成交金额={exec_stats['expired_notional']:,.2f}元  "
         f"平均现金占比={exec_stats['avg_cash_pct']*100:.1f}%"
     )
     if exec_stats.get("delisted_stuck_count", 0) > 0:
@@ -182,6 +266,11 @@ def run_backtest(
         result.turnover.to_frame("turnover").to_parquet(out_path / "turnover.parquet")
         if result.actual_weights is not None:
             result.actual_weights.to_parquet(out_path / "actual_weights.parquet")
+        execution_stats_path = _save_execution_stats(
+            exec_stats,
+            out_path / "execution_stats.json",
+        )
         logger.info(f"  净值数据：{out_path / 'nav.parquet'}")
+        logger.info(f"  执行统计：{execution_stats_path}")
 
     return result, exec_stats

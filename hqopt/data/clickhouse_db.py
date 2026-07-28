@@ -9,7 +9,7 @@ HTTP 接口 + ``FORMAT Parquet`` → polars，零额外依赖（标准库 urllib
 | ``CLICKHOUSE_PORT`` | ``18123`` | HTTP 端口 |
 | ``CLICKHOUSE_DB``   | ``the_quant`` | 库名（SQL 里写 ``库名.表名`` 可跨库，无需切换） |
 | ``CLICKHOUSE_USER`` | ``dw_player`` | 只读账号 |
-| ``CLICKHOUSE_WIND_PASSWORD`` | —（**必填**） | 只读密码，仅环境变量；2026-07-10 起服务端凭证已合并，单一密码覆盖全部库（wind_db/the_quant/cne6_risk/...） |
+| ``CLICKHOUSE_WIND_PASSWORD`` | —（**必填**） | 只读密码，仅环境变量；2026-07-10 起服务端凭证已合并，单一密码覆盖全部库（wind_db/the_quant/test_barra_cne6_gao/...） |
 | ``CLICKHOUSE_PASSWORD`` | — | 旧变量名，仍兼容（优先级高于上者） |
 
 用法::

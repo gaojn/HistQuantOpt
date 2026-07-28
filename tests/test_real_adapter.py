@@ -66,6 +66,17 @@ def test_suspended_overrides_limit_up(adapter: RealMarketAdapter) -> None:
     )
 
 
+def test_suspended_overrides_st_and_new_listing(adapter: RealMarketAdapter) -> None:
+    """停牌优先级最高，避免 ST/次新覆盖后丢失持仓冻结语义。"""
+    today = _make_today("停牌", close=10.0, limit_up=11.0, limit_down=9.0)
+    today.loc[:, "is_st"] = True
+    today.loc[:, "list_days"] = 10
+
+    result = adapter._compute_status(today)
+
+    assert result.iloc[0] == TradingStatus.SUSPENDED
+
+
 # ── 场景4：正常交易日，价格未触界 → NORMAL ────────────────────────────
 def test_normal_trading(adapter: RealMarketAdapter) -> None:
     today = _make_today("交易", close=10.5, limit_up=12.0, limit_down=9.8)

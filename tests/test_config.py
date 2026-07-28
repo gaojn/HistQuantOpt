@@ -1,5 +1,5 @@
 """两个 default 配置可加载且字段完整。"""
-from hqopt.pipeline.batch_optimize import load_config, _parse_style_bound
+from hqopt.pipeline.batch_optimize import _parse_style_bound, load_config
 
 
 def test_default_configs_load():
@@ -11,6 +11,9 @@ def test_default_configs_load():
         assert cfg["strategy"] == strat
         assert "execution" in cfg
         assert cfg["alpha"]["synthetic"] is True
+        assert cfg["alpha"]["max_staleness_days"] == 15
+        if strat == "index_enhance":
+            assert cfg["optimizer"]["benchmark_max_snapshot_age_days"] == 30
         for k in ("start_date", "end_date", "rebalance_freq", "initial_value"):
             assert k in cfg["backtest"]
         assert "weight_upper" in cfg["optimizer"]

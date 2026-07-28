@@ -3,9 +3,9 @@ import pandas as pd
 import pytest
 
 from hqopt.data.index_close import (
+    available_indices,
     load_index_close,
     load_index_returns,
-    available_indices,
 )
 
 CSV = """date,沪深300,中证500,中证1000,中证红利,万得全A

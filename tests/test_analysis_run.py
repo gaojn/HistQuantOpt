@@ -14,7 +14,10 @@ import pytest
 
 import hqopt.analysis.run as runmod
 from hqopt.analysis.run import _load_weights, run_attribution
-
+from hqopt.backtest.execution import (
+    sell_only_path_for_weights,
+    write_sell_only_manifest,
+)
 
 # ── 构造最小行情面板（2 票 × 5 交易日，全程可交易）─────────────────
 
@@ -74,8 +77,12 @@ def patched(monkeypatch, tmp_path):
     _RecordingAttributor.calls = []
     monkeypatch.setattr(runmod, "load_panel",
                         lambda *a, **k: _panel())
-    monkeypatch.setattr(runmod, "CNE6RiskModel", lambda data_dir=None: object())
-    monkeypatch.setattr(runmod, "FactorReturnLoader", lambda: object())
+    monkeypatch.setattr(
+        runmod, "CNE6RiskModel", lambda data_dir=None, query_dates=None: object()
+    )
+    monkeypatch.setattr(
+        runmod, "FactorReturnLoader", lambda data_dir=None: object()
+    )
     monkeypatch.setattr(runmod, "ReturnAttributor", _RecordingAttributor)
 
     weight_df = pd.DataFrame(
@@ -140,6 +147,35 @@ def test_run_attribution_passes_replayed_actual_weights(patched, tmp_path):
     assert (out_dir / "attribution_summary.csv").exists()
     assert (out_dir / "attribution_daily.parquet").exists()
     assert (out_dir / "attribution_factor_daily.parquet").exists()
+    assert (out_dir / "attribution_execution_stats.json").exists()
+
+
+def test_run_attribution_applies_sell_only_sidecar(patched):
+    """归因重放必须读取 sidecar；制度性只卖股票不能按新目标反向加仓。"""
+    weight_df = pd.DataFrame(
+        {"A": [0.6, 0.8], "B": [0.4, 0.2]},
+        index=pd.to_datetime(["2024-01-02", "2024-01-04"]),
+    )
+    weight_df.to_parquet(patched)
+    sell_only = pd.DataFrame(
+        {"A": [False, True], "B": [False, False]},
+        index=weight_df.index,
+    )
+    sell_only.to_parquet(sell_only_path_for_weights(patched))
+    write_sell_only_manifest(patched)
+
+    run_attribution(
+        patched,
+        "2024-01-02",
+        "2024-01-08",
+        index="all",
+        cost_buy=0.0,
+        cost_sell=0.0,
+    )
+
+    actual = _RecordingAttributor.calls[-1]["actual_weight_df"]
+    assert actual.loc[pd.Timestamp("2024-01-05"), "A"] == pytest.approx(0.6)
+    assert actual.loc[pd.Timestamp("2024-01-05"), "B"] == pytest.approx(0.2)
 
 
 def test_run_attribution_filters_weights_to_date_range(patched):

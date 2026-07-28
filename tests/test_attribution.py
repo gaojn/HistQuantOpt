@@ -267,7 +267,7 @@ def test_run_attribution_replays_blocked_execution(tmp_path, monkeypatch):
     monkeypatch.setattr(
         attribution_run,
         "FactorReturnLoader",
-        lambda: FactorReturnLoader(data_dir=tmp_path),
+        lambda data_dir=None: FactorReturnLoader(data_dir=tmp_path),
     )
 
     result = attribution_run.run_attribution(

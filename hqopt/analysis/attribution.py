@@ -15,7 +15,7 @@
                   └──────── 风格 + 行业 + Country ────────┘   └── 选股 ──┘
 
 其中 X_active_k = Σ_i w_active_i · X_ik（该持有期内固定不变的主动暴露），
-f_k(t)/u_i(t) 来自 ClickHouse cne6_risk（与暴露 X 同源，见
+f_k(t)/u_i(t) 来自 ClickHouse test_barra_cne6_gao 对应 S/L 模型（与暴露 X 同源，见
 :mod:`hqopt.risk.attribution_data`），保证暴露与收益出自
 同一套模型，残差自检才有意义。
 
@@ -28,7 +28,7 @@ f_k(t)/u_i(t) 来自 ClickHouse cne6_risk（与暴露 X 同源，见
 （在暴露/收益对齐正确、且持仓票均在风险模型估计域内时，两者恒等）。
 
 已知局限——残差不会严格为 0：
-    1. **覆盖缺口**：cne6_risk 的暴露/特质收益只覆盖其估计域
+    1. **覆盖缺口**：test_barra_cne6_gao 的暴露/特质收益只覆盖其估计域
        （``univ_flag==1``，剔除次新/极小市值/长期停牌等）。组合或基准
        里在估计域外的持仓，其真实收益仍计入"主动收益"，但因子/特质
        两项均为 0（暴露和特质收益都取不到），全部漏进残差。
@@ -54,7 +54,7 @@ import numpy as np
 import pandas as pd
 
 from hqopt.risk.attribution_data import FactorReturnLoader
-from hqopt.risk.cne6_risk import CNE6RiskModel, STYLE_FACTORS
+from hqopt.risk.cne6_risk import STYLE_FACTORS, CNE6RiskModel
 
 _TRADING_DAYS = 252
 _COUNTRY = "Country"
@@ -108,9 +108,9 @@ def _carino_summary(items: dict[str, pd.Series], active_return: pd.Series) -> pd
 @dataclass
 class AttributionResult:
     """归因结果。"""
-    factor_daily: pd.DataFrame   # index=date, columns=47 因子, 逐日贡献 X_active_k·f_k(t)
+    factor_daily: pd.DataFrame   # index=date, columns=S 51/L 47因子, 逐日贡献 X_active_k·f_k(t)
     daily: pd.DataFrame          # index=date, 汇总列：style_total/industry_total/country/specific/active_return/residual
-    summary: pd.DataFrame        # index=归因项（16风格因子+行业合计+Country+特质+残差+合计）
+    summary: pd.DataFrame        # index=归因项（S20/L16风格+行业合计+Country+特质+残差+合计）
 
     def __str__(self) -> str:
         return self.summary.to_string(float_format=lambda v: f"{v:+.4f}")
@@ -122,7 +122,7 @@ class ReturnAttributor:
     Parameters
     ----------
     risk_model : CNE6RiskModel
-        因子暴露来源（须与 factor_loader 同源，即均来自 ClickHouse cne6_risk）。
+        因子暴露来源（须与 factor_loader 同源，即均来自 test_barra_cne6_gao 的同一S/L模型）。
     factor_loader : FactorReturnLoader
         因子收益 / 个股特质收益来源。
     """

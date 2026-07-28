@@ -170,10 +170,11 @@ def test_ie_suspended_with_holding_frozen():
         alpha, snap, benchmark_weight=bm_w, prev_weight=prev_w
     )
     assert res.is_feasible
-    # 停牌持仓票权重 == w_prev（容差 1e-5）
-    assert abs(res.weights[0] - prev_w[0]) < 1e-5
-    # 停牌无持仓票权重 == 0
-    assert res.weights[1] < 1e-6
+    # 求解后处理也必须精确保留冻结值，不能被全组合归一化再次改变。
+    assert res.weights[0] == prev_w[0]
+    assert res.weights[1] == 0.0
+    assert res.weights.sum() == pytest.approx(1.0, abs=1e-6)
+    assert res.weights.sum() <= 1.0 + 1e-12
 
 
 def test_ie_suspended_holding_no_turnover_budget():
@@ -268,8 +269,10 @@ def test_am_suspended_with_holding_frozen():
     cfg = AlphaMaxConfig(weight_upper=0.10, industry_upper=0.5, max_turnover=1.0)
     res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, prev_weight=prev_w)
     assert res.is_feasible
-    assert abs(res.weights[0] - prev_w[0]) < 1e-5
-    assert res.weights[1] < 1e-6
+    assert res.weights[0] == prev_w[0]
+    assert res.weights[1] == 0.0
+    assert res.weights.sum() == pytest.approx(1.0, abs=1e-6)
+    assert res.weights.sum() <= 1.0 + 1e-12
 
 
 def test_am_sell_only_no_new_buy():
@@ -286,6 +289,49 @@ def test_am_sell_only_no_new_buy():
     res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, prev_weight=prev_w)
     assert res.is_feasible
     assert res.weights[2] <= prev_w[2] + 1e-5
+
+
+@pytest.mark.parametrize("strategy", ["alpha_max", "index_enhance"])
+def test_signal_day_limits_do_not_constrain_next_day_target(strategy):
+    """T 日涨跌停不代表 T+1 不可交易，不得限制目标权重方向。"""
+    snap = MarketDataGenerator(n_stocks=20, seed=123).generate()
+    snap.status[:] = TradingStatus.NORMAL
+    snap.status.iloc[0] = TradingStatus.LIMIT_UP
+    snap.status.iloc[1] = TradingStatus.LIMIT_DOWN
+
+    prev_w = np.full(snap.n_stocks, 0.8 / (snap.n_stocks - 2))
+    prev_w[0] = 0.0
+    prev_w[1] = 0.2
+    alpha = np.zeros(snap.n_stocks)
+    alpha[0] = 100.0
+    alpha[1] = -100.0
+
+    if strategy == "alpha_max":
+        cfg = AlphaMaxConfig(
+            weight_upper=0.5,
+            industry_upper=1.0,
+            diversification_penalty=0.0,
+        )
+        res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, prev_weight=prev_w)
+    else:
+        bm_w = np.full(snap.n_stocks, 1.0 / snap.n_stocks)
+        cfg = IndexEnhanceConfig(
+            weight_upper=0.5,
+            min_constituent_ratio=0.0,
+            industry_active_bound=1.0,
+            style_active_bound=10.0,
+            tracking_penalty=0.0,
+        )
+        res = IndexEnhanceOptimizer(cfg).optimize(
+            alpha,
+            snap,
+            benchmark_weight=bm_w,
+            prev_weight=prev_w,
+        )
+
+    assert res.is_feasible
+    assert res.weights[0] > 0.1, "T 日涨停票应允许生成 T+1 买入目标"
+    assert res.weights[1] < prev_w[1] - 0.1, "T 日跌停票应允许生成 T+1 卖出目标"
 
 
 # ═══════════════════════════════════════════════════════════════

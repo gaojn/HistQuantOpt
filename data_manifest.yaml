@@ -5,7 +5,7 @@ supported_python:
   - "3.14.6"
 
 column_sets:
-  cne6_factors:
+  cne6_styles_l:
     - Size
     - MidCap
     - Beta
@@ -22,6 +22,12 @@ column_sets:
     - EarningsVariability
     - Leverage
     - DividendYield
+  cne6_styles_s_extra:
+    - AnalystSentiment
+    - IndustryMomentum
+    - Seasonality
+    - ShortTermReversal
+  cne6_non_style_factors:
     - Country
     - 交通运输
     - 传媒
@@ -65,13 +71,24 @@ profiles:
       - index_weight
       - default_alpha
   attribution:
-    description: 默认策略及收益归因
+    description: 默认短周期S策略及收益归因
     assets:
       - market_cache
       - cne6s_exposure
       - cne6s_covariance
       - factor_return
       - specific_return
+      - index_close
+      - index_weight
+      - default_alpha
+  attribution_long:
+    description: 长周期L策略及收益归因
+    assets:
+      - market_cache
+      - cne6l_exposure
+      - cne6l_covariance
+      - factor_return_l
+      - specific_return_l
       - index_close
       - index_weight
       - default_alpha
@@ -115,7 +132,7 @@ assets:
     path: data/barra_cne6/exposure_panel.parquet
     format: parquet
     required_columns: [rebal_date, code, spec_var]
-    required_column_sets: [cne6_factors]
+    required_column_sets: [cne6_styles_l, cne6_styles_s_extra, cne6_non_style_factors]
     date_column: rebal_date
     required_start: "2020-01-02"
     required_end: "2026-05-29"
@@ -124,7 +141,7 @@ assets:
     path: data/barra_cne6/factor_cov_panel.parquet
     format: parquet
     required_columns: [rebal_date, factor]
-    required_column_sets: [cne6_factors]
+    required_column_sets: [cne6_styles_l, cne6_styles_s_extra, cne6_non_style_factors]
     date_column: rebal_date
     required_start: "2020-01-02"
     required_end: "2026-05-29"
@@ -133,7 +150,7 @@ assets:
     path: data/barra_cne6_L/exposure_panel.parquet
     format: parquet
     required_columns: [rebal_date, code, spec_var]
-    required_column_sets: [cne6_factors]
+    required_column_sets: [cne6_styles_l, cne6_non_style_factors]
     date_column: rebal_date
     required_start: "2020-01-02"
     required_end: "2026-05-29"
@@ -142,7 +159,7 @@ assets:
     path: data/barra_cne6_L/factor_cov_panel.parquet
     format: parquet
     required_columns: [rebal_date, factor]
-    required_column_sets: [cne6_factors]
+    required_column_sets: [cne6_styles_l, cne6_non_style_factors]
     date_column: rebal_date
     required_start: "2020-01-02"
     required_end: "2026-05-29"
@@ -157,6 +174,22 @@ assets:
 
   specific_return:
     path: data/barra_cne6/specific_return.parquet
+    format: parquet
+    required_columns: [trade_date, code, u]
+    date_column: trade_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  factor_return_l:
+    path: data/barra_cne6_L/factor_return.parquet
+    format: parquet
+    required_columns: [trade_date, factor_name, ret]
+    date_column: trade_date
+    required_start: "2020-01-02"
+    required_end: "2026-05-29"
+
+  specific_return_l:
+    path: data/barra_cne6_L/specific_return.parquet
     format: parquet
     required_columns: [trade_date, code, u]
     date_column: trade_date

@@ -77,3 +77,20 @@ def test_data_invalid_choice():
 def test_subcommand_required():
     with pytest.raises(SystemExit):
         build_parser().parse_known_args([])
+
+
+def test_attribute_benchmark_weight_source_defaults_to_drift():
+    args = build_parser().parse_args([
+        "attribute", "--weights", "w.parquet", "--start", "2024-01-01",
+        "--end", "2024-12-31",
+    ])
+    assert args.benchmark_weight_source == "official_drift"
+    assert args.benchmark_max_snapshot_age_days == 30
+
+
+def test_attribute_accepts_legacy_frozen_benchmark_weights():
+    args = build_parser().parse_args([
+        "attribute", "--weights", "w.parquet", "--start", "2024-01-01",
+        "--end", "2024-12-31", "--benchmark-weight-source", "official_frozen",
+    ])
+    assert args.benchmark_weight_source == "official_frozen"

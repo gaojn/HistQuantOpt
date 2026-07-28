@@ -19,9 +19,14 @@
     |B_style[:,k]'(w-w_bm)| ≤ S_active                  风格主动暴露 (±0.3σ)
     |w_i − w_bm_i|          ≤ δ                          单票主动偏离上限（可选）
     ‖w − w_prev‖₁           ≤ T_max                     双边换手率硬上限（可选）
-    w[停牌/ST/次新]          = 0                         交易状态
+    w[停牌且有持仓]           = w_prev                    冻结权重
+    w[停牌且无持仓]           = 0                         禁止新开仓
+    T 日涨跌停不限制目标方向，是否成交由 T+1 行情决定
 
-求解器：CLARABEL
+交易状态掩码、换手项与求解降级由 :mod:`hqopt.optimizer._common` 与
+`alpha_max` 共用。
+
+求解器：CLARABEL（失败降级 SCS）
 """
 
 from __future__ import annotations
@@ -34,34 +39,21 @@ import numpy as np
 import pandas as pd
 
 from hqopt.data.generator import MarketSnapshot
+from hqopt.optimizer._common import (
+    BasePortfolioResult,
+    build_trading_masks,
+    finalize_weights,
+    industry_matrix_for,
+    neutralize_alpha,
+    resolve_style_bounds,
+    solve_with_fallback,
+    state_constraints,
+    turnover_terms,
+    weight_upper_vector,
+)
 
 if TYPE_CHECKING:
     from hqopt.risk.cne6_risk import RiskSnapshot
-
-# 未列出且无 default 时，用极大值表示"不约束"（避免 cvxpy 的 inf 问题）
-_UNBOUNDED = 1e6
-
-
-def _resolve_style_bounds(
-    bound: "float | dict[str, float]", factor_names: "pd.Index | list[str]"
-) -> np.ndarray:
-    """把 style_active_bound（float 或 dict）展开成与因子列对齐的 K 维上限向量。"""
-    if isinstance(bound, dict):
-        default = bound.get("default", _UNBOUNDED)
-        return np.array([float(bound.get(f, default)) for f in factor_names], dtype=float)
-    return np.full(len(factor_names), float(bound), dtype=float)
-
-
-def _industry_group_matrix(ind_values: np.ndarray, n: int) -> np.ndarray:
-    """构造行业分组矩阵 G (K×n)，G[k,i]=1 表示股票 i 属于第 k 个行业。
-
-    用 G @ w 一次性表达全部行业权重和，替代逐行业 append 的标量约束。
-    """
-    uniq = pd.unique(ind_values)
-    G = np.zeros((len(uniq), n), dtype=float)
-    for k, name in enumerate(uniq):
-        G[k, ind_values == name] = 1.0
-    return G
 
 
 @dataclass
@@ -133,48 +125,25 @@ class IndexEnhanceOptimizer:
         style_loading: pd.DataFrame | None = None,
         prev_weight: np.ndarray | None = None,
         cost_vector: np.ndarray | None = None,
-        risk_snapshot: "RiskSnapshot | None" = None,
-    ) -> "IndexEnhanceResult":
+        risk_snapshot: RiskSnapshot | None = None,
+    ) -> IndexEnhanceResult:
+        """执行优化。
+
+        ``alpha`` 必须是截面 z-score（理由同 :meth:`AlphaMaxOptimizer.optimize`）。
+        """
         cfg = self.config
         tickers = snapshot.tickers
         n = len(tickers)
 
-        alpha = np.array(alpha, dtype=float)
         w_bm = np.array(benchmark_weight, dtype=float)
         # 基准权重归一化（防浮点偏差）
         bm_sum = w_bm.sum()
         if bm_sum > 1e-8:
             w_bm = w_bm / bm_sum
 
-        # 交易状态掩码
-        suspended_mask   = snapshot.suspended_mask    # bool (N,)
-        new_listing_mask = snapshot.new_listing_mask  # bool (N,)
-        st_mask          = snapshot.st_mask           # bool (N,)
-
-        # 涨停：不可加仓；跌停：不可减仓
-        lup_mask = snapshot.limit_up_mask
-        ldn_mask = snapshot.limit_down_mask
-
-        # 上期持仓（None → 全零）
-        w_prev_for_mask = (
-            np.array(prev_weight, dtype=float) if prev_weight is not None
-            else np.zeros(n)
-        )
-        held = w_prev_for_mask > 1e-12
-
-        # ── 三类互斥掩码（优先级：frozen > sell_only > zero）──────────────────
-        # frozen：停牌且有持仓 → w == w_prev（不计换手、不释放资金）
-        frozen_mask   = suspended_mask & held
-        # zero：停牌/次新/ST 且无持仓 → w == 0
-        zero_mask     = (suspended_mask | new_listing_mask | st_mask) & ~held
-        # sell_only：掉池持仓票 + 次新/ST 持仓票 → w <= w_prev（只卖不买）
-        sellonly_mask = (
-            snapshot.sell_only_mask
-            | ((new_listing_mask | st_mask) & held)
-        ) & ~frozen_mask & ~zero_mask
-
-        # alpha 清零：冻结/强零/只卖票均无需优化器驱动方向
-        alpha[frozen_mask | zero_mask | sellonly_mask] = 0.0
+        # 三类互斥交易状态掩码（优先级：frozen > zero > sell_only）
+        masks = build_trading_masks(snapshot, prev_weight)
+        alpha = neutralize_alpha(alpha, masks)
 
         w = cp.Variable(n, name="w", nonneg=True)
         constraints = []
@@ -183,13 +152,7 @@ class IndexEnhanceOptimizer:
         constraints.append(cp.sum(w) == 1.0)
 
         # 2. 个股上界（向量化，冻结票豁免：漂移后持仓可能超绝对上限）
-        w_upper_vec = np.full(n, cfg.weight_upper)
-        frozen_idx = np.where(frozen_mask)[0]
-        if len(frozen_idx) > 0:
-            w_upper_vec[frozen_idx] = np.maximum(
-                cfg.weight_upper, w_prev_for_mask[frozen_idx]
-            )
-        constraints.append(w <= w_upper_vec)
+        constraints.append(w <= weight_upper_vector(masks, cfg.weight_upper))
 
         # 2b. 单票主动偏离上限 |w_i - w_bm_i| ≤ δ（冻结票豁免，其 w 已被等式固定）
         # 下界（w_bm - w <= delta_ub）额外豁免 zero/sellonly：
@@ -197,39 +160,16 @@ class IndexEnhanceOptimizer:
         #   它们的负主动偏离是被动制度结果，非主动超配，应豁免下界约束
         if cfg.active_weight_upper is not None:
             delta_ub = cfg.active_weight_upper
-            non_frozen_idx = np.where(~frozen_mask)[0]
+            non_frozen_idx = np.where(~masks.frozen)[0]
             if len(non_frozen_idx) > 0:
                 constraints.append(w[non_frozen_idx] - w_bm[non_frozen_idx] <= delta_ub)
             # 下界豁免 zero/sellonly（制度被迫负偏离，不施加下界约束）
-            exempt_lower = frozen_mask | zero_mask | sellonly_mask
-            lower_active_idx = np.where(~exempt_lower)[0]
+            lower_active_idx = np.where(~masks.restricted)[0]
             if len(lower_active_idx) > 0:
                 constraints.append(w_bm[lower_active_idx] - w[lower_active_idx] <= delta_ub)
 
-        # 3. 三类状态约束（向量化）
-        # 3a. 冻结：w[frozen] == w_prev（停牌持仓，等式固定，|Δw|=0 自动不消耗换手）
-        if len(frozen_idx) > 0:
-            constraints.append(w[frozen_idx] == w_prev_for_mask[frozen_idx])
-
-        # 3b. 强制零：停牌/次新/ST 且无持仓
-        zero_idx = np.where(zero_mask)[0]
-        if len(zero_idx) > 0:
-            constraints.append(w[zero_idx] == 0.0)
-
-        # 3c. 只卖不买：掉池持仓票 + 次新/ST 持仓票（卖出正常计换手）
-        sellonly_idx = np.where(sellonly_mask)[0]
-        if len(sellonly_idx) > 0:
-            constraints.append(w[sellonly_idx] <= w_prev_for_mask[sellonly_idx])
-
-        # 3d. 涨跌停约束（依赖上期权重，向量化）
-        if prev_weight is not None:
-            w_prev = w_prev_for_mask  # 上方已计算
-            lup_idx = np.where(lup_mask)[0]
-            ldn_idx = np.where(ldn_mask)[0]
-            if len(lup_idx) > 0:
-                constraints.append(w[lup_idx] <= w_prev[lup_idx])   # 涨停：不可加仓
-            if len(ldn_idx) > 0:
-                constraints.append(w[ldn_idx] >= w_prev[ldn_idx])   # 跌停：不可减仓
+        # 3. 三类状态约束（冻结 / 强制零 / 只卖不买）
+        constraints.extend(state_constraints(w, masks))
 
         # 4. 成分股权重下限
         if snapshot.is_constituent is not None and cfg.min_constituent_ratio > 0:
@@ -240,8 +180,7 @@ class IndexEnhanceOptimizer:
                 )
 
         # 5. 行业相对基准偏离（向量化：|G@w - G@w_bm| <= 上限）
-        industries = snapshot.industry.reindex(tickers).fillna("未知")
-        G_ind = _industry_group_matrix(industries.values, n)
+        G_ind = industry_matrix_for(snapshot, n)
         bm_ind = G_ind @ w_bm                       # (K,) 基准各行业权重
         active_ind = G_ind @ w - bm_ind             # (K,) 主动偏离
         constraints.append(active_ind <= cfg.industry_active_bound)
@@ -251,32 +190,19 @@ class IndexEnhanceOptimizer:
         if style_loading is not None:
             B = style_loading.reindex(tickers).fillna(0.0).values  # (N, K)
             active_exp = B.T @ (w - w_bm)
-            bound_vec = _resolve_style_bounds(cfg.style_active_bound, style_loading.columns)
+            bound_vec = resolve_style_bounds(cfg.style_active_bound, style_loading.columns)
             constraints.append(active_exp <= bound_vec)
             constraints.append(active_exp >= -bound_vec)
 
-        # 7. 换手约束与惩罚
+        # 7. 换手硬上限 + 软惩罚
         # 注：冻结票因 w==w_prev 等式约束，|w-w_prev|=0，自动不消耗换手预算。
-        turnover_penalty_term = 0.0
-        if prev_weight is not None:
-            w_prev = w_prev_for_mask  # 上方已计算（np.array）
-            delta_w = cp.abs(w - w_prev)
-
-            # 7a. 软约束：加权换手惩罚进目标函数
-            if cfg.turnover_penalty > 0:
-                if cost_vector is not None:
-                    c = np.array(cost_vector, dtype=float)
-                    c = np.clip(c, 0.0, None)
-                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(cp.multiply(c, delta_w))
-                else:
-                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(delta_w)
-
-            # 7b. 硬上限（可与软惩罚同时存在）
-            if cfg.max_turnover is not None:
-                # 实际成交可能因涨停/停牌留下现金，使股票权重和 < 1。
-                # 现金重新投入不挤占原本用于股票间调仓的换手预算。
-                cash_gap = max(0.0, 1.0 - float(w_prev.sum()))
-                constraints.append(cp.sum(delta_w) <= cfg.max_turnover + cash_gap)
+        turnover_constraints, turnover_penalty_term = turnover_terms(
+            w, masks,
+            max_turnover=cfg.max_turnover,
+            turnover_penalty=cfg.turnover_penalty,
+            cost_vector=cost_vector,
+        )
+        constraints.extend(turnover_constraints)
 
         # 8. L2 偏离基准硬约束（TE 代理）
         if cfg.weight_diff_l2_bound is not None:
@@ -285,7 +211,6 @@ class IndexEnhanceOptimizer:
         # 目标函数：max w'α - 主动风险惩罚 - λ·Σ c_i|Δw_i|
         # 风险项：优先 CNE6 因子风险模型 λ·(active'XFX'active + δ'active²)，
         #         未提供时退回 L2 偏离惩罚 γ·‖w-w_bm‖²（向后兼容）
-        # 成本项：加权换手惩罚 turnover_penalty_term（软约束，见上方 step 7）
         if cfg.risk_aversion is not None and risk_snapshot is not None:
             active = w - w_bm
             X = risk_snapshot.X                       # (N, K)
@@ -303,32 +228,15 @@ class IndexEnhanceOptimizer:
         objective = cp.Maximize(alpha @ w - risk_penalty - turnover_penalty_term)
 
         prob = cp.Problem(objective, constraints)
-        # 优先 CLARABEL（max_iter 提至 500，应对大规模候选池）；
-        # 失败时降级 SCS 兜底
-        # 优先 CLARABEL，失败再尝试 SCS 兜底
-        clarabel_ok = False
-        try:
-            prob.solve(solver=cp.CLARABEL, max_iter=500, verbose=False)
-            clarabel_ok = prob.status in ("optimal", "optimal_inaccurate")
-        except Exception:
-            clarabel_ok = False
-
-        if not clarabel_ok:
-            try:
-                prob.solve(solver=cp.SCS, max_iters=10000, verbose=False)
-            except Exception as e:
-                return IndexEnhanceResult.infeasible(tickers, f"both solvers failed: {e}")
-
+        failure = solve_with_fallback(prob)
+        if failure is not None:
+            return IndexEnhanceResult.infeasible(tickers, failure)
         if prob.status not in ("optimal", "optimal_inaccurate"):
             return IndexEnhanceResult.infeasible(tickers, prob.status)
 
-        weights = np.clip(np.array(w.value, dtype=float), 0.0, None)
-        if weights.sum() > 1e-8:
-            weights /= weights.sum()
-
         return IndexEnhanceResult(
             tickers=tickers,
-            weights=weights,
+            weights=finalize_weights(np.array(w.value, dtype=float), masks),
             status=prob.status,
             objective_value=float(prob.value),
             snapshot=snapshot,
@@ -337,33 +245,10 @@ class IndexEnhanceOptimizer:
 
 
 @dataclass
-class IndexEnhanceResult:
+class IndexEnhanceResult(BasePortfolioResult):
     """指数增强优化结果。"""
-    tickers: list[str]
-    weights: np.ndarray
-    status: str
-    objective_value: float
-    snapshot: MarketSnapshot | None
+
     benchmark_weight: np.ndarray | None = None
-
-    @classmethod
-    def infeasible(cls, tickers: list[str], reason: str) -> "IndexEnhanceResult":
-        return cls(
-            tickers=tickers,
-            weights=np.zeros(len(tickers)),
-            status=f"infeasible: {reason}",
-            objective_value=float("nan"),
-            snapshot=None,
-            benchmark_weight=None,
-        )
-
-    @property
-    def is_feasible(self) -> bool:
-        return "optimal" in self.status
-
-    @property
-    def n_positions(self) -> int:
-        return int((self.weights > 1e-6).sum())
 
     @property
     def active_weight(self) -> np.ndarray | None:
@@ -371,20 +256,11 @@ class IndexEnhanceResult:
             return None
         return self.weights - self.benchmark_weight
 
-    def to_series(self) -> pd.Series:
-        return pd.Series(self.weights, index=self.tickers, name="weight")
-
     def top_holdings(self, n: int = 10) -> pd.DataFrame:
-        s = self.to_series().sort_values(ascending=False).head(n)
-        df = s.to_frame("weight")
-        df["weight_pct"] = df["weight"] * 100
-        if self.snapshot is not None:
-            df["industry"] = self.snapshot.industry.reindex(s.index)
-            if self.snapshot.is_constituent is not None:
-                df["is_constituent"] = self.snapshot.is_constituent.reindex(s.index)
+        df = super().top_holdings(n)
         if self.benchmark_weight is not None:
             bm_s = pd.Series(self.benchmark_weight * 100, index=self.tickers)
-            df["bm_weight_pct"] = bm_s.reindex(s.index)
+            df["bm_weight_pct"] = bm_s.reindex(df.index)
             df["active_pct"]    = df["weight_pct"] - df["bm_weight_pct"]
         return df
 
@@ -400,20 +276,12 @@ class IndexEnhanceResult:
 
     def industry_active_weights(self) -> pd.Series:
         """各行业相对基准的主动权重偏离（正=超配，负=低配）。"""
-        if self.snapshot is None or self.benchmark_weight is None:
+        ind = self._industry_series()
+        if ind is None or self.benchmark_weight is None:
             return pd.Series(dtype=float)
-        ind = self.snapshot.industry.reindex(self.tickers).fillna("未知")
         port = pd.Series(self.weights, index=self.tickers).groupby(ind.values).sum()
         bm   = pd.Series(self.benchmark_weight, index=self.tickers).groupby(ind.values).sum()
         return (port - bm).sort_values(ascending=False)
-
-    def industry_weights(self) -> pd.Series:
-        """各行业绝对权重。"""
-        if self.snapshot is None:
-            return pd.Series(dtype=float)
-        ind = self.snapshot.industry.reindex(self.tickers).fillna("未知")
-        return pd.Series(self.weights, index=self.tickers) \
-            .groupby(ind.values).sum().sort_values(ascending=False)
 
     def tracking_error_l2(self) -> float:
         """跟踪误差 L2 范数（粗略代理）。"""

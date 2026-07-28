@@ -2,7 +2,7 @@
 A股量化多头组合优化框架。
 
 主流程：
-    1. CNE6RiskModel           —— 加载 CNE6 因子风险模型（16 风格因子暴露 + 协方差）
+    1. CNE6RiskModel           —— 加载 CNE6S(20风格)/L(16风格)因子风险模型
     2. AlphaMaxOptimizer       —— QP 优化器（max w'α - γ‖w‖²）
     3. RealisticBacktester     —— T+1 VWAP 真实执行回测引擎
 
@@ -15,11 +15,11 @@ A股量化多头组合优化框架。
 
 import logging
 
+from hqopt.analysis import AttributionResult, ReturnAttributor
+from hqopt.backtest.engine import BacktestResult, RealisticBacktester
+from hqopt.data.benchmark import IndexBenchmarkWeights
 from hqopt.data.generator import MarketSnapshot, TradingStatus
 from hqopt.data.real_adapter import RealMarketAdapter
-from hqopt.data.benchmark import IndexBenchmarkWeights
-from hqopt.risk import CNE6RiskModel, FactorReturnLoader
-from hqopt.analysis import AttributionResult, ReturnAttributor
 from hqopt.optimizer.alpha_max import (
     AlphaMaxConfig,
     AlphaMaxOptimizer,
@@ -30,7 +30,7 @@ from hqopt.optimizer.index_enhance import (
     IndexEnhanceOptimizer,
     IndexEnhanceResult,
 )
-from hqopt.backtest.engine import BacktestResult, RealisticBacktester
+from hqopt.risk import CNE6RiskModel, FactorReturnLoader
 
 # Backtester 是旧公开 API 名称；真实执行回测已统一融合到 engine.py。
 Backtester = RealisticBacktester

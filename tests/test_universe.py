@@ -128,7 +128,7 @@ def test_filter_then_optimize_carry_stock(snap30):
 
     # 上期持仓：drop_ticker 有 5% 仓位，其余若干正常票均匀持仓
     keep_tickers = sorted_by_cap.index[:20].tolist()
-    prev_w_dict = {t: 0.05 for t in keep_tickers[:5]}   # 前5只各5%
+    prev_w_dict = dict.fromkeys(keep_tickers[:5], 0.05)   # 前5只各5%
     prev_w_dict[drop_ticker] = 0.05                       # 掉池票也有5%
     # 归一
     total = sum(prev_w_dict.values())
@@ -173,7 +173,7 @@ def test_multiple_carry_stocks(snap30):
     sorted_by_cap = snap30.market_cap.sort_values(ascending=False)
     drop_tickers = sorted_by_cap.index[20:23].tolist()  # 3 只
 
-    prev_holdings = pd.Series({t: 0.05 for t in drop_tickers})
+    prev_holdings = pd.Series(dict.fromkeys(drop_tickers, 0.05))
 
     result = filter_universe(
         snap30, panel, TARGET,

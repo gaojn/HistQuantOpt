@@ -107,9 +107,7 @@ DERIVED_SCHEMA: list[tuple[str, str]] = [
 
 
 COLUMN_RENAME_MAP: dict[str, str] = {wind: std for wind, std, _ in SCHEMA}
-COLUMN_DOCS: dict[str, str] = {std: doc for _, std, doc in SCHEMA} | {
-    name: doc for name, doc in DERIVED_SCHEMA
-}
+COLUMN_DOCS: dict[str, str] = {std: doc for _, std, doc in SCHEMA} | dict(DERIVED_SCHEMA)
 
 
 OUTPUT_COLUMNS: list[str] = [

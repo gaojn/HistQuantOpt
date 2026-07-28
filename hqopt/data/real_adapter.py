@@ -20,8 +20,8 @@ import pandas as pd
 import polars as pl
 
 from hqopt.constants import LIMIT_TOL
-from hqopt.io.data_panel import load_panel
 from hqopt.data.generator import MarketSnapshot, TradingStatus
+from hqopt.io.data_panel import load_panel
 
 
 class RealMarketAdapter:
@@ -187,7 +187,7 @@ class RealMarketAdapter:
         else:
             raise ValueError(f"mode 须为 'constituent_only' 或 'constituent_plus'，当前：{mode!r}")
 
-        tickers_sub = [t for t, k in zip(snapshot.tickers, keep) if k]
+        tickers_sub = [t for t, k in zip(snapshot.tickers, keep, strict=True) if k]
         w_sub = snapshot.prev_weight[tickers_sub]
         total = w_sub.sum()
         w_sub = (w_sub / total) if total > 1e-10 else w_sub
@@ -323,14 +323,14 @@ class RealMarketAdapter:
         )
         status[hit_down] = TradingStatus.LIMIT_DOWN
 
-        # 3. 停牌（覆盖涨跌停，停牌日以固定仓位处理）
-        status[ts == "停牌"] = TradingStatus.SUSPENDED
-
-        # 4. 次新股（上市不足 new_listing_days 个自然日）
+        # 3. 次新股（上市不足 new_listing_days 个自然日）
         status[list_days < self.new_listing_days] = TradingStatus.NEW_LISTING
 
-        # 5. ST / *ST（禁止持仓，独立状态）
+        # 4. ST / *ST（禁止持仓，独立状态）
         status[is_st] = TradingStatus.ST
+
+        # 5. 停牌优先级最高：停牌持仓必须冻结股数，不能被 ST/次新覆盖。
+        status[ts == "停牌"] = TradingStatus.SUSPENDED
 
         return pd.Series(status, index=idx, name="status")
 

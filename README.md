@@ -32,6 +32,7 @@ hqopt run configs/index_enhance_default.yaml    # 指数增强（中证1000）
 | **[docs/操作指南.md](docs/操作指南.md)** | **新成员从这里开始**：数据准备（含 ClickHouse 拉数）、CLI 用法、配置参数与默认值、输出口径、调参 FAQ |
 | [docs/method.md](docs/method.md) | 两策略数学模型、约束体系、团队默认参数、Barra 风格约束建议、收益归因方法 |
 | [docs/design.md](docs/design.md) | 架构设计：因子体系 / 风险模型 / 模块结构 / 数据流 |
+| [CHANGELOG.md](CHANGELOG.md) | **影响回测口径的变更**与需重跑的范围；升级后先看这里 |
 
 ## 测试
 
@@ -39,3 +40,14 @@ hqopt run configs/index_enhance_default.yaml    # 指数增强（中证1000）
 python3.14 -m pytest tests/ -q   # 主版本：3.14.6
 python3.12 -m pytest tests/ -q   # 兼容版本
 ```
+
+CI 在 3.14.6 / 3.12 两个版本上跑 `ruff check .` 与带覆盖率门禁的测试：
+
+```bash
+pip install -e ".[dev]"
+ruff check .
+pytest -q --cov=hqopt --cov-fail-under=85
+```
+
+Ruff 规则集见 `pyproject.toml` 的 `[tool.ruff.lint]`（E/F/I/B/UP/SIM/C4，
+E501 与另两条规则的豁免理由已在配置里注明）。覆盖率门禁 85%，当前约 89%。

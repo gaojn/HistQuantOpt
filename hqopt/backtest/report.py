@@ -24,12 +24,25 @@ from plotly.subplots import make_subplots
 
 from hqopt.backtest.engine import BacktestResult
 
+# 换手一节的主色（柱状图与指标卡片左边框共用，保持同组视觉一致）
+_TURNOVER_COLOR = "#1f618d"
 
 # ─────────────────────────────────────────────────────────────────
 # 工具：年度绩效计算
 # ─────────────────────────────────────────────────────────────────
 
 def _annual_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> dict:
+    """单个分组（通常是一个自然年）的绩效指标。
+
+    口径与 ``engine.calc_metrics`` 对齐，两处漂移会让同一张报告里的同名指标
+    不可比（见 tests/test_metric_consistency.py）：
+
+    - **信息比率**分子用几何年化超额 ``(1+R_p)/(1+R_b)-1`` 后年化，
+      不用算术的 ``日均超额×252``。IR 的分母 TE 本身是年化量，分子必须同为年化。
+    - **Calmar** 分子用该分组的**累计**收益，与分母（同期最大回撤）同期，
+      不做年化外推。年度行与全期行均使用这一口径；否则不足一年的年份会被放大
+      （实测 3 个月样本累计 +8.99% 会外推成年化 +43.55%，Calmar 从 0.15 跳到 5.09）。
+    """
     n_days  = len(ret)
     n_years = n_days / 252 if n_days > 0 else 1
     total   = (1 + ret).prod() - 1
@@ -40,11 +53,15 @@ def _annual_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> d
     sharpe  = ((ret.mean() - rf_daily) / (ret.std() + 1e-12)) * np.sqrt(252) if len(ret) > 1 else 0
     nav     = (1 + ret).cumprod()
     mdd     = float((nav / nav.cummax() - 1).min()) if len(nav) > 0 else 0
-    calmar  = ann_ret / (abs(mdd) + 1e-12)
+    # 分子分母同期：累计收益 / 同期最大回撤，不年化外推
+    calmar  = total / (abs(mdd) + 1e-12)
     bm_tot  = (1 + bm).prod() - 1
     exc     = ret - bm
     exc_vol = exc.std() * np.sqrt(252) if len(exc) > 1 else 0
-    ir      = (exc.mean() * 252) / (exc_vol + 1e-12)
+    # 几何超额后年化，与 calc_metrics.info_ratio 同口径
+    total_exc_geo = (1 + total) / max(1 + bm_tot, 1e-8) - 1
+    ann_exc = (1 + total_exc_geo) ** (1 / n_years) - 1 if n_years > 0 else 0.0
+    ir      = ann_exc / (exc_vol + 1e-12)
 
     # 超额净值回撤（几何）
     port_nav     = (1 + ret).cumprod()
@@ -60,7 +77,7 @@ def _annual_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> d
         "sharpe":        sharpe,
         "max_dd":        mdd,
         "calmar":        calmar,
-        "excess_return": (1 + total) / (1 + bm_tot) - 1 if (1 + bm_tot) > 1e-8 else 0.0,
+        "annual_excess_return": ann_exc,
         "info_ratio":    ir,
         "excess_vol":    exc_vol,
         "excess_max_dd": exc_max_dd,
@@ -205,7 +222,7 @@ def _make_turnover_chart(result: BacktestResult) -> str:
         return ""
     fig = go.Figure(data=go.Bar(
         x=to.index, y=to.values * 100,
-        marker_color="#5dade2",
+        marker_color=_TURNOVER_COLOR,
     ))
     fig.add_hline(
         y=to.mean() * 100, line_dash="dot", line_color="#7f8c8d",
@@ -226,7 +243,7 @@ def _build_turnover_card(result: BacktestResult) -> str:
 
     def card(title: str, value: str, sub: str) -> str:
         return (
-            '<div class="metric-card" style="border-left-color:#5dade2">'
+            f'<div class="metric-card" style="border-left-color:{_TURNOVER_COLOR}">'
             f'<div class="metric-title">{title}</div>'
             f'<div class="metric-value">{value}</div>'
             f'<div class="metric-sub">{sub}</div>'
@@ -278,7 +295,7 @@ def _build_overall_card(result: BacktestResult) -> str:
         card("年化超额",    f"{pm.annual_excess_return*100:.2f}%", "组合 vs 基准",    "#3498db", colored=True),
         card("跟踪误差",    f"{pm.tracking_error*100:.2f}%",       "年化超额波动",     "#3498db"),
         card("信息比率IR",  f"{pm.info_ratio:.2f}",                "超额/跟踪误差",    "#3498db", colored=True),
-        card("超额Calmar",  f"{pm.excess_calmar:.2f}",             "超额/超额回撤",    "#3498db"),
+        card("超额Calmar",  f"{pm.excess_calmar:.2f}",             "全期累计超额/超额回撤", "#3498db"),
         card("超额最大回撤", f"{pm.excess_max_drawdown*100:.2f}%",  "超额净值最大下行",  "#c0392b", colored=True),
     )
 
@@ -288,7 +305,7 @@ def _build_overall_card(result: BacktestResult) -> str:
         card("年化收益",  f"{pm.annual_return*100:.2f}%",  f"基准 {bm.annual_return*100:.2f}%",  "#e74c3c"),
         card("年化波动",  f"{pm.annual_vol*100:.2f}%",      f"基准 {bm.annual_vol*100:.2f}%",      "#95a5a6"),
         card("Sharpe",   f"{pm.sharpe:.2f}",               f"基准 {bm.sharpe:.2f}",               "#f39c12"),
-        card("Calmar",   f"{pm.calmar:.2f}",               f"基准 {bm.calmar:.2f}",               "#f39c12"),
+        card("Calmar",   f"{pm.calmar:.2f}",               f"全期累计/回撤；基准 {bm.calmar:.2f}", "#f39c12"),
         card("最大回撤",  f"{pm.max_drawdown*100:.2f}%",    f"基准 {bm.max_drawdown*100:.2f}%",    "#c0392b", colored=True),
     )
 
@@ -326,10 +343,10 @@ def _build_yearly_table(result: BacktestResult) -> str:
             "超额回撤":  m["excess_max_dd"],
         })
 
-    # 总体行（年化口径）
+    # 总体行：收益/波动等展示年化值；Calmar 分子仍是全期累计收益。
     tsum = _turnover_summary(result)
     rows.append({
-        "年份":      "<b>全期(年化*)</b>",
+        "年份":      "<b>全期(收益年化*)</b>",
         "组合收益":  result.portfolio_metrics.annual_return,
         "基准收益":  result.benchmark_metrics.annual_return,
         "超额收益":  result.portfolio_metrics.annual_excess_return,
@@ -345,6 +362,10 @@ def _build_yearly_table(result: BacktestResult) -> str:
     })
 
     html = """
+    <p style="font-size:11px; color:#7f8c8d; margin:4px 0 4px 0">
+    年度行收益为当年累计；全期行收益列为年化（标 *）。所有 Calmar 均为对应区间
+    累计收益 / 同期最大回撤，不做年化。Sharpe / IR / 波动率 / 跟踪误差均为年化。
+    </p>
     <table class="stats-table">
         <thead><tr>
             <th>年份</th><th>组合收益</th><th>基准收益</th><th>超额收益</th>

@@ -42,6 +42,8 @@ alpha:
   synthetic: true            # 文件本身由未来收益构造；强制终端/目录/HTML 三重水印
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
   path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
+  standardize: true          # 优化域内截面 z-score；关掉则 risk_aversion 等系数随因子量纲漂移
+  max_staleness_days: 15     # 10交易日换仓约对应15自然日；超限跳过，禁止无限复用旧信号
 
 execution:
   cost_buy: 0.001           # 买入费率 1‰

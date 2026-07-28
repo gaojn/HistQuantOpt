@@ -16,9 +16,14 @@
     sum(w[const])       >= min_constituent_ratio 成分股权重下限（可选）
     |B_style[:,k]' w|   <= style_bound           风格因子绝对暴露约束
     ‖w - w_prev‖₁       <= max_turnover          双边换手率硬上限（可选）
-    w[停牌/ST/次新]      = 0                      禁止持仓
+    w[停牌且有持仓]       = w_prev                 冻结权重
+    w[停牌且无持仓]       = 0                      禁止新开仓
+    T 日涨跌停不限制目标方向，是否成交由 T+1 行情决定
 
-求解器：CLARABEL
+交易状态掩码、换手项与求解降级由 :mod:`hqopt.optimizer._common` 与
+`index_enhance` 共用。
+
+求解器：CLARABEL（失败降级 SCS）
 """
 
 from __future__ import annotations
@@ -31,33 +36,21 @@ import numpy as np
 import pandas as pd
 
 from hqopt.data.generator import MarketSnapshot
+from hqopt.optimizer._common import (
+    BasePortfolioResult,
+    build_trading_masks,
+    finalize_weights,
+    industry_matrix_for,
+    neutralize_alpha,
+    resolve_style_bounds,
+    solve_with_fallback,
+    state_constraints,
+    turnover_terms,
+    weight_upper_vector,
+)
 
 if TYPE_CHECKING:
     from hqopt.risk.cne6_risk import RiskSnapshot
-
-_UNBOUNDED = 1e6
-
-
-def _resolve_style_bounds(
-    bound: "float | dict[str, float]", factor_names: "pd.Index | list[str]"
-) -> np.ndarray:
-    """把 style_bound（float 或 dict）展开成与因子列对齐的 K 维上限向量。"""
-    if isinstance(bound, dict):
-        default = bound.get("default", _UNBOUNDED)
-        return np.array([float(bound.get(f, default)) for f in factor_names], dtype=float)
-    return np.full(len(factor_names), float(bound), dtype=float)
-
-
-def _industry_group_matrix(ind_values: np.ndarray, n: int) -> np.ndarray:
-    """构造行业分组矩阵 G (K×n)，G[k,i]=1 表示股票 i 属于第 k 个行业。
-
-    用 G @ w 一次性表达全部行业权重和，替代逐行业 append 的标量约束。
-    """
-    uniq = pd.unique(ind_values)
-    G = np.zeros((len(uniq), n), dtype=float)
-    for k, name in enumerate(uniq):
-        G[k, ind_values == name] = 1.0
-    return G
 
 
 @dataclass
@@ -133,15 +126,17 @@ class AlphaMaxOptimizer:
         style_loading: pd.DataFrame | None = None,
         prev_weight: np.ndarray | None = None,
         cost_vector: np.ndarray | None = None,
-        risk_snapshot: "RiskSnapshot | None" = None,
-    ) -> "AlphaMaxResult":
+        risk_snapshot: RiskSnapshot | None = None,
+    ) -> AlphaMaxResult:
         """
         执行优化。
 
         Parameters
         ----------
         alpha : np.ndarray, shape (N,)
-            Alpha 向量，与 snapshot.tickers 对齐
+            Alpha 向量，与 snapshot.tickers 对齐。必须是**截面 z-score**：
+            α 与 γ/risk_aversion/turnover_penalty 量纲耦合，同一因子排序乘 100 倍
+            即可把分散组合压成单票全仓。走 pipeline 时由 `alpha.standardize` 保证。
         snapshot : MarketSnapshot
             市场快照
         style_loading : pd.DataFrame | None
@@ -168,34 +163,9 @@ class AlphaMaxOptimizer:
         tickers = snapshot.tickers
         n = len(tickers)
 
-        alpha = np.array(alpha, dtype=float)
-
-        # 交易状态掩码
-        suspended_mask   = snapshot.suspended_mask
-        new_listing_mask = snapshot.new_listing_mask
-        st_mask          = snapshot.st_mask
-
-        # 涨停：不可加仓；跌停：不可减仓
-        lup_mask = snapshot.limit_up_mask
-        ldn_mask = snapshot.limit_down_mask
-
-        # 上期持仓（None → 全零）
-        w_prev_for_mask = (
-            np.array(prev_weight, dtype=float) if prev_weight is not None
-            else np.zeros(n)
-        )
-        held = w_prev_for_mask > 1e-12
-
-        # ── 三类互斥掩码（优先级：frozen > sell_only > zero）──────────────────
-        frozen_mask   = suspended_mask & held
-        zero_mask     = (suspended_mask | new_listing_mask | st_mask) & ~held
-        sellonly_mask = (
-            snapshot.sell_only_mask
-            | ((new_listing_mask | st_mask) & held)
-        ) & ~frozen_mask & ~zero_mask
-
-        # alpha 清零
-        alpha[frozen_mask | zero_mask | sellonly_mask] = 0.0
+        # 三类互斥交易状态掩码（优先级：frozen > zero > sell_only）
+        masks = build_trading_masks(snapshot, prev_weight)
+        alpha = neutralize_alpha(alpha, masks)
 
         w = cp.Variable(n, name="w", nonneg=True)
         constraints = []
@@ -204,42 +174,13 @@ class AlphaMaxOptimizer:
         constraints.append(cp.sum(w) == 1.0)
 
         # ---- 2. 个股上限（向量化，冻结票豁免）----
-        w_upper_vec = np.full(n, cfg.weight_upper)
-        frozen_idx = np.where(frozen_mask)[0]
-        if len(frozen_idx) > 0:
-            w_upper_vec[frozen_idx] = np.maximum(
-                cfg.weight_upper, w_prev_for_mask[frozen_idx]
-            )
-        constraints.append(w <= w_upper_vec)
+        constraints.append(w <= weight_upper_vector(masks, cfg.weight_upper))
 
-        # ---- 3. 三类状态约束（向量化）----
-        # 3a. 冻结：w[frozen] == w_prev（|Δw|=0 自动不消耗换手预算）
-        if len(frozen_idx) > 0:
-            constraints.append(w[frozen_idx] == w_prev_for_mask[frozen_idx])
-
-        # 3b. 强制零：停牌/次新/ST 且无持仓
-        zero_idx = np.where(zero_mask)[0]
-        if len(zero_idx) > 0:
-            constraints.append(w[zero_idx] == 0.0)
-
-        # 3c. 只卖不买：掉池持仓票 + 次新/ST 持仓票
-        sellonly_idx = np.where(sellonly_mask)[0]
-        if len(sellonly_idx) > 0:
-            constraints.append(w[sellonly_idx] <= w_prev_for_mask[sellonly_idx])
-
-        # ---- 3d. 涨跌停约束（依赖上期权重，向量化）----
-        if prev_weight is not None:
-            w_prev_arr = w_prev_for_mask  # 上方已计算
-            lup_idx = np.where(lup_mask)[0]
-            ldn_idx = np.where(ldn_mask)[0]
-            if len(lup_idx) > 0:
-                constraints.append(w[lup_idx] <= w_prev_arr[lup_idx])   # 涨停：不可加仓
-            if len(ldn_idx) > 0:
-                constraints.append(w[ldn_idx] >= w_prev_arr[ldn_idx])   # 跌停：不可减仓
+        # ---- 3. 三类状态约束（冻结 / 强制零 / 只卖不买）----
+        constraints.extend(state_constraints(w, masks))
 
         # ---- 4. 行业绝对权重上限（向量化：G @ w <= 上限）----
-        industries = snapshot.industry.reindex(tickers).fillna("未知")
-        G_ind = _industry_group_matrix(industries.values, n)
+        G_ind = industry_matrix_for(snapshot, n)
         constraints.append(G_ind @ w <= cfg.industry_upper)
 
         # ---- 5. 成分股权重下限（可选）----
@@ -258,37 +199,23 @@ class AlphaMaxOptimizer:
             B = style_loading.reindex(tickers).fillna(0.0).values  # (N, K)
             # |B[:,k]' w| <= style_bound  逐因子
             exposure = B.T @ w   # (K,)
-            bound_vec = _resolve_style_bounds(cfg.style_bound, style_loading.columns)
+            bound_vec = resolve_style_bounds(cfg.style_bound, style_loading.columns)
             constraints.append(exposure <= bound_vec)
             constraints.append(exposure >= -bound_vec)
 
-        # ---- 7. 换手约束与惩罚 ----
+        # ---- 7. 换手硬上限 + 软惩罚 ----
         # 注：冻结票因 w==w_prev 等式约束，|w-w_prev|=0，自动不消耗换手预算。
-        turnover_penalty_term = 0.0
-        if prev_weight is not None:
-            w_prev = w_prev_for_mask  # 上方已计算
-            delta_w = cp.abs(w - w_prev)
-
-            # 7a. 软约束：加权换手惩罚进目标函数
-            if cfg.turnover_penalty > 0:
-                if cost_vector is not None:
-                    c = np.array(cost_vector, dtype=float)
-                    c = np.clip(c, 0.0, None)
-                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(cp.multiply(c, delta_w))
-                else:
-                    turnover_penalty_term = cfg.turnover_penalty * cp.sum(delta_w)
-
-            # 7b. 硬上限（可与软惩罚同时存在）
-            if cfg.max_turnover is not None:
-                # 实际成交可能因涨停/停牌留下现金，使股票权重和 < 1。
-                # 现金重新投入不挤占原本用于股票间调仓的换手预算。
-                cash_gap = max(0.0, 1.0 - float(w_prev.sum()))
-                constraints.append(cp.sum(delta_w) <= cfg.max_turnover + cash_gap)
+        turnover_constraints, turnover_penalty_term = turnover_terms(
+            w, masks,
+            max_turnover=cfg.max_turnover,
+            turnover_penalty=cfg.turnover_penalty,
+            cost_vector=cost_vector,
+        )
+        constraints.extend(turnover_constraints)
 
         # ---- 目标：max w'α - 风险惩罚 - 成本惩罚 ----
         # 风险项：优先 CNE6 因子风险模型 λ·(w'XFX'w + δ'w²)，
         #         未提供时退回 L2 分散惩罚 γ·‖w‖²（向后兼容）
-        # 成本项：加权换手惩罚 turnover_penalty_term（软约束，见上方 step 7）
         if cfg.risk_aversion is not None and risk_snapshot is not None:
             X = risk_snapshot.X                       # (N, K)
             F = risk_snapshot.F                       # (K, K)
@@ -305,31 +232,15 @@ class AlphaMaxOptimizer:
         objective = cp.Maximize(alpha @ w - risk_penalty - turnover_penalty_term)
 
         prob = cp.Problem(objective, constraints)
-        # 优先 CLARABEL（max_iter 提至 500，应对大规模候选池）；
-        # 失败时降级 SCS 兜底（与 index_enhance 保持一致）
-        clarabel_ok = False
-        try:
-            prob.solve(solver=cp.CLARABEL, max_iter=500, verbose=False)
-            clarabel_ok = prob.status in ("optimal", "optimal_inaccurate")
-        except Exception:
-            clarabel_ok = False
-
-        if not clarabel_ok:
-            try:
-                prob.solve(solver=cp.SCS, max_iters=10000, verbose=False)
-            except Exception as e:
-                return AlphaMaxResult.infeasible(tickers, f"both solvers failed: {e}")
-
+        failure = solve_with_fallback(prob)
+        if failure is not None:
+            return AlphaMaxResult.infeasible(tickers, failure)
         if prob.status not in ("optimal", "optimal_inaccurate"):
             return AlphaMaxResult.infeasible(tickers, prob.status)
 
-        weights = np.clip(np.array(w.value, dtype=float), 0.0, None)
-        if weights.sum() > 1e-8:
-            weights /= weights.sum()
-
         return AlphaMaxResult(
             tickers=tickers,
-            weights=weights,
+            weights=finalize_weights(np.array(w.value, dtype=float), masks),
             status=prob.status,
             objective_value=float(prob.value),
             snapshot=snapshot,
@@ -337,50 +248,8 @@ class AlphaMaxOptimizer:
 
 
 @dataclass
-class AlphaMaxResult:
+class AlphaMaxResult(BasePortfolioResult):
     """优化结果。"""
-    tickers: list[str]
-    weights: np.ndarray
-    status: str
-    objective_value: float
-    snapshot: MarketSnapshot | None
-
-    @classmethod
-    def infeasible(cls, tickers: list[str], reason: str) -> "AlphaMaxResult":
-        return cls(
-            tickers=tickers,
-            weights=np.zeros(len(tickers)),
-            status=f"infeasible: {reason}",
-            objective_value=float("nan"),
-            snapshot=None,
-        )
-
-    @property
-    def is_feasible(self) -> bool:
-        return "optimal" in self.status
-
-    @property
-    def n_positions(self) -> int:
-        return int((self.weights > 1e-6).sum())
-
-    def to_series(self) -> pd.Series:
-        return pd.Series(self.weights, index=self.tickers, name="weight")
-
-    def top_holdings(self, n: int = 10) -> pd.DataFrame:
-        s = self.to_series().sort_values(ascending=False).head(n)
-        df = s.to_frame("weight")
-        df["weight_pct"] = df["weight"] * 100
-        if self.snapshot is not None:
-            df["industry"] = self.snapshot.industry.reindex(s.index)
-            if self.snapshot.is_constituent is not None:
-                df["is_constituent"] = self.snapshot.is_constituent.reindex(s.index)
-        return df
-
-    def industry_weights(self) -> pd.Series:
-        if self.snapshot is None:
-            return pd.Series(dtype=float)
-        ind = self.snapshot.industry.reindex(self.tickers).fillna("未知")
-        return self.to_series().groupby(ind.values).sum().sort_values(ascending=False)
 
     def style_exposures(self, style_loading: pd.DataFrame) -> pd.Series:
         """计算组合风格因子暴露。"""

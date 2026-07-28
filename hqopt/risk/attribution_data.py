@@ -1,11 +1,12 @@
 """因子收益 / 特质收益加载器（收益归因用）。
 
-消费 scripts/export_factor_attribution.py 从 ClickHouse cne6_risk 导出的：
-    data/barra_cne6/factor_return.parquet    —— trade_date, factor_name, ret
-    data/barra_cne6/specific_return.parquet  —— trade_date, code, u
+消费 scripts/export_factor_attribution.py 从 ClickHouse test_barra_cne6_gao
+对应 S/L 模型导出的：
+    data/barra_cne6[_L]/factor_return.parquet    —— trade_date, factor_name, ret
+    data/barra_cne6[_L]/specific_return.parquet  —— trade_date, code, u
 
 与 hqopt.risk.cne6_risk.CNE6RiskModel 消费的 exposure_panel.parquet
-同源（均来自 cne6_risk），因子名对齐，供 hqopt.analysis.attribution
+同源（均来自 test_barra_cne6_gao 的对应 S/L 模型），因子名对齐，供 hqopt.analysis.attribution
 做「暴露 X × 因子收益 f」+「特质收益 u」的归因分解。
 """
 

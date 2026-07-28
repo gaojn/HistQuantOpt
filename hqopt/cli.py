@@ -25,8 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 # data 子命令 → scripts/ 下的导出脚本（数据准备为开发期运维，依赖源码仓库）
 _DATA_SCRIPTS = {
     "sync": "sync_ashare_cache.py",          # A股行情缓存（the_quant）
-    "cne6": "export_cne6_panels.py",         # CNE6 风险面板（the_quant）
-    "factor-return": "export_factor_attribution.py",  # 因子/特质收益（cne6_risk，收益归因用）
+    "cne6": "export_cne6_panels.py",         # CNE6S/L 风险面板（test_barra_cne6_gao）
+    "factor-return": "export_factor_attribution.py",  # S/L因子/特质收益（同源归因）
     "index-close": "export_index_close.py",  # 指数日收盘价（wind_db）
     "index-weight": "export_index_weight.py",# 指数官方成分权重（wind_db）
 }
@@ -65,8 +65,8 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     """一站式：优化 → 回测 → 报告。基准默认 = 指增取 config.index、多头取中证全指。"""
-    from hqopt.pipeline.batch_optimize import load_config, run_batch_optimize
     from hqopt.backtest.run import run_backtest
+    from hqopt.pipeline.batch_optimize import load_config, run_batch_optimize
 
     cfg = load_config(args.config)
     _override_alpha_file(cfg, args.alpha_file)
@@ -98,6 +98,8 @@ def cmd_attribute(args: argparse.Namespace) -> None:
     from hqopt.analysis.run import run_attribution
     run_attribution(
         args.weights, args.start, args.end, index=args.index,
+        benchmark_weight_source=args.benchmark_weight_source,
+        benchmark_max_snapshot_age_days=args.benchmark_max_snapshot_age_days,
         out_dir=args.out_dir, cne6_data_dir=args.cne6_data_dir,
         cost_buy=args.cost_buy, cost_sell=args.cost_sell,
         initial_value=args.initial_value,
@@ -149,6 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--end", required=True, help="归因截止日 如 2026-05-31")
     pa.add_argument("--index", default="zz1000",
                      help="基准：hs300/zz500/zz1000 用官方成分权重，其余（如 all/csiall）用全市场等权")
+    pa.add_argument(
+        "--benchmark-weight-source",
+        choices=["official_drift", "official_frozen", "reconstruct", "official"],
+        default="official_drift",
+        help="成分指数权重口径（默认 official_drift）",
+    )
+    pa.add_argument(
+        "--benchmark-max-snapshot-age-days",
+        type=int,
+        default=30,
+        help="official_drift 快照最大陈旧自然日数（默认 30）",
+    )
     pa.add_argument("--out-dir", default=None, help="归因结果输出目录")
     pa.add_argument("--cne6-data-dir", default=None, help="CNE6 风险面板目录，默认短周期 S")
     pa.add_argument("--cost-buy", type=float, default=0.001)

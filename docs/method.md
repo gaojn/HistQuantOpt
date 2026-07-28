@@ -46,14 +46,19 @@ $$
 | 指数增强 | $\gamma\,\lVert w-w_{bm}\rVert_2^2$（偏离基准） | $\lambda\,(a^\top XFX^\top a + \delta^\top a^2),\ a=w-w_{bm}$ |
 
 其中 $X$=因子暴露、$F$=因子协方差、$\delta$=特质方差，来自 CNE6 风险面板
-（47 因子 = 16 风格 + Country + 30 中信一级行业，详见 [design.md](design.md) 与
+（S=51 因子：20 风格 + Country + 30 行业；L=47 因子：16 风格 + Country + 30 行业，
+详见 [design.md](design.md) 与
 [`risk/cne6_risk.py`](../hqopt/risk/cne6_risk.py)）。
 L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性与个股特质风险差异。
 
-> **指数增强的基准权重 $w_{bm}$** 默认取指数**官方成分权重**（由 wind_db 导出，
-> 月度快照，按调仓日 asof 取 ≤当日最近快照）；官方未覆盖的日期/指数自动回退
-> free_mv 分级靠档**重构**。可在 YAML 设 `optimizer.benchmark_weight_source: reconstruct`
-> 切回纯重构。导出脚本见 [操作指南.md](操作指南.md) 数据准备。
+> **指数增强的基准权重 $w_{bm}$** 默认使用 `official_drift`：取不晚于 T 日的
+> 最近官方月度/调样快照 S，并用后复权收盘价直接漂移
+> $w_i(T)\propto w_i(S)P_i^{adj}(T)/P_i^{adj}(S)$。快照日直接使用官方原值；
+> 停牌/缺当日价格只向前取最近有效价，严禁使用下一快照插值。默认只允许快照陈旧
+> 30 个自然日（`benchmark_max_snapshot_age_days`）；超过阈值、官方未覆盖、价格
+> 不完整或每日成分名单与快照不一致，均告警并回退 free_mv 分级靠档重构，同时写入
+> `batch_execution_stats.json/benchmark_quality`。旧冻结口径用 `official_frozen`，纯重构
+> 用 `reconstruct`；兼容值 `official` 等同 `official_drift`。
 
 ---
 
@@ -77,18 +82,23 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 
 **约束 7 — A 股交易状态**（强制，贴近真实成交，停牌冻结口径）：
 
-三类互斥掩码，优先级：frozen > sell_only > zero。
+三类互斥掩码，优先级：frozen > zero > sell_only。
 
 | 条件 | 掩码 | 数学约束 | 说明 |
 |---|---|---|---|
 | 停牌 & 有持仓（$w_{\text{prev},i}>0$） | **frozen** | $w_i = w_{\text{prev},i}$ | 冻结，不计换手、不释放资金 |
 | 停牌/次新/ST & 无持仓 | **zero** | $w_i = 0$ | 禁止开仓 |
 | 掉出候选池的持仓票、次新/ST 有持仓 | **sell_only** | $w_i \le w_{\text{prev},i}$ | 只卖不买，卖出正常计换手与成本 |
-| 涨停 LIMIT_UP | — | $w_i \le w_{\text{prev},i}$ | 不可加仓（与 sell_only 方向相同） |
-| 跌停 LIMIT_DOWN | — | $w_i \ge w_{\text{prev},i}$ | 不可减仓 |
 
-**优化域 = 当期候选池 ∪ 上期持仓（有当日行情的票）**（`filter_universe` 的 `prev_holdings` 参数控制）。
-真退市票（当日 panel 无行情行）无法进优化域，按原有逻辑清零+归一并输出告警日志。
+**T 日涨跌停不进入目标约束。** T 日收盘只能知道 T 日状态，不能据此推断 T+1
+能否成交；因此优化器可以对 T 日涨停股生成买入目标，也可以对 T 日跌停股生成卖出
+目标。实际能否成交只使用执行日（T+1/T+2/T+3）的行情判断。
+
+**优化域 = 当期候选池 ∪ 上期持仓（有当日行情的票）**（`filter_universe` 的
+`prev_holdings` 参数控制）。已有持仓若当日 panel 无行情行，则不进入优化域，但仍
+按最近有效价格保留在真实成交账本中：股数不变、不释放现金，也不把其权重清零或将
+其余目标重新归一化；系统同时输出场外滞留持仓告警。优化器只为当日可建模股票生成
+目标，真实组合则继续包含该滞留持仓。
 
 冻结票上界豁免：$W_{\max,i}^{\text{frozen}} = \max(W_{\max}, w_{\text{prev},i})$，避免漂移后持仓超上限导致 infeasible。
 `active_weight_upper`（指增专属）对冻结票同样豁免，仅对非冻结票施加。
@@ -100,7 +110,8 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 `sell_only`，禁止新开仓、已有持仓只能减仓；指数增强按基准权重计算覆盖率，低于
 `min_risk_coverage`（默认 0.90）跳过该期优化并告警（不中断整段回测），避免缺失值填 0 造成假中性。
 
-涨跌停约束需传 `prev_weight`；状态判定见 [`RealMarketAdapter._compute_status`](../hqopt/data/real_adapter.py)。
+状态判定见 [`RealMarketAdapter._compute_status`](../hqopt/data/real_adapter.py)；停牌优先级
+高于 ST/次新，避免停牌持仓丢失冻结语义。
 
 > ⚠️ 行业上限不可行陷阱：若所有行业上限之和 < 100% 则无解
 > （30 个行业 × $I_{\max}$ 须 ≥ 1）。
@@ -138,13 +149,13 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 
 原则：**先统一因子优先级，再按 universe 调强弱**，不为每个 universe 写死一套参数。
 
-**因子分层**（16 个 CNE6 风格）：
+**因子分层**（L 为16个核心风格；S 额外包含4个快策略风格）：
 
 | 层 | 因子 | 处理 |
 |---|---|---|
 | A 基础护栏 | `Size` `Liquidity` `ResidualVolatility` `Beta` | 几乎总要约束（最易把组合做歪） |
 | B 多数约束 | `Momentum` | 中等约束（防风格切换回撤、推高换手） |
-| C 视 alpha | `Value` `Growth` `EarningsYield` `Profitability` | 是收益风格本身，收太紧会削收益 |
+| C 视 alpha | `Value` `Growth` `EarningsYield` `Profitability`；S专属 `AnalystSentiment` `IndustryMomentum` `Seasonality` `ShortTermReversal` | 是收益风格本身，收太紧会削收益 |
 | D 默认监控 | `MidCap` `LongTermReversal` `InvestmentQuality` `EarningsQuality` `EarningsVariability` `Leverage` `DividendYield` | 不建议先硬约束（多与主因子重复） |
 
 **按 Universe 速查**：
@@ -167,20 +178,98 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 ## 6. 求解与性能
 
 - **类型**：凸二次规划（QP），求解器 **CLARABEL**（`max_iter=500`）；两个优化器（`index_enhance`/`alpha_max`）均在 CLARABEL 失败时降级 **SCS**（`max_iters=10000`）兜底
-- **失败处理**：返回 `infeasible` 时不提交新目标；成交账本继续执行旧的未完成目标
-- **数值稳定**：求解后 `clip(0)` + 归一化消除浮点误差
+- **失败处理**：快照、风险覆盖或求解失败导致没有新权重行时，不提交新目标；该日不
+  构成有效调仓，旧目标保持激活并正常尝试
+- **数值稳定**：求解后 `clip(0)`，停牌无持仓精确置零、停牌持仓精确恢复
+  $w_{\text{prev}}$；不再二次归一化，避免放大 sell_only、个股上限等硬约束，
+  预算数值超额只向下扣减非冻结权重。单票粉尘只有在累计也不超过 $10^{-6}$ 时
+  才清零，否则原样保留，避免累计破坏下限类硬约束；微小预算缺口保留为现金
 - **规模**：全市场 ~5000 只（剔北交所+ST）约 1s/期
-- **首个调仓日**：组合日收益固定为 0（首日全仓现金，T+1 才建仓），基准当日有收益，存在一日不对等（对 Sharpe 影响极小，但长期回测首日图形可见跳变）。
-- **延期成交**：涨停不可买、跌停不可卖、停牌不可交易的订单会保留；后续交易日
-  按实际持仓与最新目标重新计算差额。新一期目标会替换尚未完成的旧目标
+- **首个调仓日**：组合仍为全现金，组合与基准日收益都固定为 0，两者统一从首个调仓日收盘起算，避免首日基准收益一次性侵蚀超额。
+- **延期成交**：每个目标只在 T+1、T+2、T+3 三个交易日尝试；每经过一个交易日
+  都计一次（包括停牌、涨跌停或 VWAP 缺失）。T+3 完成最后一次尝试后，剩余订单
+  标记 `EXPIRED`，之后不再交易，直到下一调仓目标重新激活
 - **risk_aversion 置 0**：显式设 `risk_aversion: 0.0` 将完全关闭风险惩罚项（factor_risk/specific_risk 均不加入目标函数），等价于纯 alpha 最大化；与 `risk_aversion: null`（退回 L2 兜底）行为不同。
+
+### 6.1 T+1 成交状态机
+
+T 日收盘提交目标，最早 T+1 成交。股票级状态为 `FROZEN / PENDING_SELL /
+PENDING_BUY / FILLED / EXPIRED`：
+
+- T 日停牌股在整个目标生命周期内为 `FROZEN`：有持仓保持股数不变，无持仓不下单；
+  即使 T+1 复牌也不交易。
+- 每个执行日只处理仍 pending 的股票，并按当日最新 NAV 和原始目标权重重算差额；
+  `FILLED` 和 `FROZEN` 股票不因价格漂移再次交易。普通 pending 可随最新差额变更
+  买卖方向；制度性 `sell_only` 只能卖，差额转正时也不会反向买入。
+- 先卖后买。涨停只阻断买入，跌停只阻断卖出；停牌或无有效 VWAP 阻断双向。
+  买入资金只来自真实现金与当日已实现卖出。
+- 现金不足时，对当日可交易的 pending 买单同比例部分成交，剩余继续 pending；
+  没有卖出且没有现金时不做买入。
+- T+3 后残余订单过期，已成交股数和部分成交股数均保留；累计过期笔数与未成交金额
+  写入执行统计 JSON。
+- 只有成功生成并提交新目标的日期才是有效调仓日：旧目标及其残余 pending 状态直接
+  取消，当日不再为旧目标增加尝试次数，只按实际股数和最新价格估值；收盘提交新目标
+  并重置股票状态，下一交易日才作为新目标的 T+1 开始三次尝试计数。
+- 若候选调仓日因快照、风险覆盖或求解失败而没有新权重行，则不构成有效调仓；旧目标
+  保持激活并在该日正常尝试。
+
+批量优化把权重、sell_only sidecar 和批量执行统计作为一个 bundle 发布。常规
+`weights.parquet` 使用 `batch_execution_stats.json`；自定义权重文件使用
+`<weights stem>.batch_execution_stats.json`，使同目录多个 bundle 的统计互不覆盖。
+全部产物先写入同目录临时文件，随后创建 `<weights stem>.bundle.in_progress`
+（如 `weights.bundle.in_progress`），使旧 manifest 失效，再依次原子替换 sidecar、
+对应统计和权重；最后原子发布 `<weights stem>.sell_only.manifest.json`。manifest v2
+的 `schema_version=2`，通过 `weights_file/weights_sha256`、
+`sell_only_file/sell_only_sha256` 和
+`batch_execution_stats_file/batch_execution_stats_sha256` 绑定三份产物。统计文件除
+成交状态外，还持久化 `optimization`（候选/成功/失败期数）和 `alpha_quality`
+（标准化、陈旧阈值、最大陈旧度、跳过/零方差期数、逐期 as-of 日期）；发布成功后
+才删除 in-progress 标记。正式替换的整个区间由该权重绝对路径派生的跨进程独占锁
+保护；回测与归因从 manifest/sidecar 校验到权重与 sidecar 读取完成，全程持同路径
+的共享锁，避免读取新旧混合 bundle，也避免两个 publisher 交错替换。
+读取端看到 in-progress 标记，或发现批量 bundle 的 manifest 缺失、清单不完整、
+哈希及结构错配时，均 fail-closed 拒绝读取。已有 manifest v1 继续按旧双文件契约
+兼容读取。
+
+外部权重若完全没有 sidecar、manifest 和 in-progress 标记，仍可在明确告警后仅执行
+目标权重，不凭空推断制度性只卖限制；一旦存在任一配套文件或标记，就按 bundle
+处理并要求契约完整有效。
+
+执行优先级为：**股数冻结 / 已成交锁定 > pending 股票逼近目标 > 全组合精确目标**。
+
+**`RealisticBacktester.run` 的内部分工**（`backtest/engine.py`）：
+
+| 函数 | 职责 |
+|---|---|
+| `_normalize_weight_inputs` | 统一权重索引为 Timestamp、绑定 sell-only 矩阵、校验调仓日在交易日历内 |
+| `_align_market_frames` | 各行情宽表裁剪对齐到「首个调仓日起」，产出只读 `_MarketFrames` |
+| `_replay_days` | 逐日：撤旧目标 → 当日成交 → 估值 → 收盘提交新目标，产出 `_ReplayRecords` |
+| `_resolve_benchmark_returns` | 对齐基准日收益（含首日置零，见下方口径说明） |
+| `_stale_holding_value` | 末日靠 ffill 陈旧价估值的滞留持仓数与市值 |
+| `_build_exec_stats` | 汇总可审计的执行统计 JSON |
+
+`_MarketFrames` 同时持有 `adj_close_raw`（当日真实价，退市/缺行为 NaN）与
+`adj_close_marked`（其 ffill 版本）：**估值走 marked、成交价走 raw**。这条分界是
+退市估值不假摔、同时又不能假装能成交的关键——不要在新增代码里把两者混用。
 
 **infeasible 常见原因**：成分股下限太高、行业约束太紧（某行业基准权重为 0 时易冲突）、
 首期建仓却设了 `max_turnover`（应传 `None`，pipeline 已自动处理首期）。
 
 **绩效指标口径**（`engine.calc_metrics`）：
+- **首个调仓日基准收益强制置零**：该日组合仍是全现金（目标收盘后才提交，最早 T+1 成交），
+  `port_ret` 必为 0；若基准照常计息，整段超额会被首日基准收益一次性侵蚀
+  （首日基准 +1%、6 年回测约低估 0.16pct 年化超额）。组合与基准统一从首个调仓日
+  **收盘**起算，`nav[0] = bm_nav[0] = excess_nav[0] = 1.0`。
 - 年化超额收益采用**几何口径**：`(1+total_port)/(1+total_bm)-1` 后再年化，与 report 年度表、全期行一致。
 - 月度超额收益表采用算术差（月组合收益 − 月基准收益），与年度/全期口径不同，报告中已注明。
+- **Calmar 统一累计口径**：年度行 = 当年累计收益 / 当年最大回撤；全期行 =
+  全期累计收益 / 全期最大回撤；超额 Calmar 同理使用全期累计几何超额。分子分母
+  始终同期且不做年化外推。报告全期行的“收益”列仍显示年化收益（标 `*`），但
+  Calmar 不使用该年化值。该口径是项目约定，跨不同长度区间比较时需谨慎。
+- **IR 两处实现必须同口径**：`report._annual_metrics` 与 `engine.calc_metrics` 是两套
+  独立实现，分子都必须是几何年化超额（不能用算术 `日均超额×252`，实测两者差 3%~59%）。
+  该不变量由 `tests/test_metric_consistency.py` 锁定，同时覆盖年化收益/波动/Sharpe/
+  最大回撤/TE/超额回撤/年化超额七项。
 - 跟踪误差（TE）= 超额日收益标准差 × √252（算术，不改口径）。
 - 信息比率 IR = 年化超额收益（几何） / 跟踪误差。
 
@@ -204,7 +293,20 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 ## 8. API 用法
 
 逐期批量优化通常直接走 [`pipeline/batch_optimize.py`](../hqopt/pipeline/batch_optimize.py)
-（YAML 驱动，见 [操作指南.md](操作指南.md)）。单期直接调优化器：
+（YAML 驱动，见 [操作指南.md](操作指南.md)）。`run_batch_optimize` 内部分三段，
+需要复用其中某一段（如只做输入装配再自定义循环）可直接调用私有函数：
+
+| 阶段 | 函数 | 职责 |
+|---|---|---|
+| 一 | `_prepare_inputs(config, panel, alpha_df)` | 解析配置、加载行情/Alpha、构造账本与优化器/风险模型，产出只读 `_BatchInputs` |
+| 二 | `_run_periods(inputs)` | 逐期推进成交账本 → 构建优化域 → 取 Alpha → 求解 → 落账，产出 `_PeriodOutcome` |
+| 三 | `_publish_outputs(inputs, outcome)` | 汇总权重矩阵，原子发布 bundle（weights + sidecar + 成交统计 + 清单） |
+
+账本推进的游标状态收敛在 `_ExecutionWalker`：`open_signal_day` 补齐调仓日之前的
+成交、信号日只估值；未发布新目标的调仓日由 `replay_signal_day` 恢复旧目标的当日
+尝试；`finish` 在区间末尾补记最后一批 T+1/T+2/T+3 成交或过期。
+
+单期直接调优化器：
 
 **量化多头**
 
@@ -261,7 +363,11 @@ print(res.industry_active_weights())        # 行业相对基准偏离
 print(res.style_active_exposure(risk_snap.style_loading()))
 ```
 
-`alpha_vec` 需与 `snap.tickers` 对齐、推荐 z-score、缺失填 0。
+`alpha_vec` 需与 `snap.tickers` 对齐、缺失填 0，且**必须是截面 z-score**——
+目标函数里 α 与风险/成本系数量纲耦合，同一因子排序乘 100 倍即可把 γ=0.05 下的
+20 只分散组合压成 1 只全仓，`risk_aversion` / `turnover_penalty` 的标定随之失效。
+直接调优化器时需自行标准化；走 pipeline 则由 `alpha.standardize`（默认 `true`）
+统一处理，详见操作指南 §3.5。
 
 ---
 
@@ -284,13 +390,14 @@ $$
 \text{主动收益}(t) \approx \underbrace{X_{active,t}^\top f(t)}_{\text{风格+行业+Country}} + \underbrace{w_{active,t}^\top u(t)}_{\text{选股（特质）}}
 $$
 
-$f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse `cne6_risk.factor_return` /
-`specific_return`，与暴露 $X$（`cne6_risk.factor_exposure`）**同源**，保证残差
+$f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse
+`test_barra_cne6_gao.factor_return_S/L` / `specific_return_S/L`，与暴露 $X$
+（`test_barra_cne6_gao.factor_exposure`）**同源且同模型**，保证残差
 自检有意义。多期用 Carino(1999) 平滑系数链接，保证 $\Sigma$ 各归因项累计 =
 真实几何累计主动收益。
 
 **残差自检**：每日「主动收益 − (风格+行业+Country+特质)」理论上应 ≈0；非零
-主要来自**覆盖缺口**——`cne6_risk` 只覆盖其估计域（`univ_flag==1`，剔除次新/
+主要来自**覆盖缺口**——`test_barra_cne6_gao` 只覆盖其估计域（`univ_flag==1`，剔除次新/
 极小市值等），组合或基准里在域外的持仓收益全部漏进残差。`daily["coverage_pct"]`
 给出每期"被模型覆盖的主动权重占比"可供判断，但覆盖率与残差占比非线性关系
 （未覆盖的常是高波动票，权重小也可能贡献不成比例的残差）。**残差占比高的
@@ -300,7 +407,9 @@ $f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse `cne6
 **已知局限**：风险模型暴露快照仍按持有期冻结，调仓越不频繁，暴露与
 `f(t)/u(t)` 实际估计所用的当日暴露之间的近似误差可能越大；成交发生在日内 VWAP，
 而因子收益是收盘到收盘口径，因此成交日仍可能出现时点残差；`t统计` 为简单
-`mean/std` 未做自相关调整（非 NW 稳健标准误）。
+`mean/std` 未做自相关调整（非 NW 稳健标准误）。此外，独立回测或归因若从调仓周期
+中途裁剪权重并以全现金启动，无法还原此前的股数和订单状态。当前接口尚不支持载入
+完整成交 checkpoint，因此精确重放必须从策略起点开始。
 
 ---
 

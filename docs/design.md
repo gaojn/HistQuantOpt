@@ -17,21 +17,26 @@
 |----------|---------------|------------------------|
 | `alpha`  | `(N,)` array  | 每只股票的预期超额收益（年化）        |
 
-### 2.2 Barra CNE6 风格因子（16 个）
+### 2.2 Barra CNE6 风格因子（S 20 个 / L 16 个）
 
-来自 ClickHouse `cne6_risk`，定义见 `hqopt/risk/cne6_risk.py::STYLE_FACTORS`：
+来自 ClickHouse `test_barra_cne6_gao`，定义见
+`hqopt/risk/cne6_risk.py::STYLE_FACTORS_S/STYLE_FACTORS_L`。
+CNE6L 的 16 个核心风格为：
 
 Size, MidCap, Beta, Momentum, ResidualVolatility, LongTermReversal, Liquidity,
 Value, EarningsYield, Growth, Profitability, InvestmentQuality, EarningsQuality,
 EarningsVariability, Leverage, DividendYield。
+
+CNE6S 在上述核心风格上增加 AnalystSentiment、IndustryMomentum、Seasonality、
+ShortTermReversal 4 个快策略风格，共 20 个。
 
 风格暴露用于 `style_active_bound` 约束（支持按因子分别设定），因子协方差/特质风险
 用于 `risk_aversion` 真跟踪误差目标项。
 
 ### 2.3 行业因子
 
-参考 CITIC 一级行业分类，共 30 个行业虚拟变量（dummy variable）。  
-每只股票属于且仅属于一个行业，行业矩阵满足：$\sum_k B_{ik}^{ind} = 1$。
+参考 CITIC 一级行业分类，共 30 个行业虚拟变量（dummy variable）。空值、空字符串和
+“未知”行业不进入模型；正常分类股票满足 $\sum_k B_{ik}^{ind}=1$，未分类股票行业暴露全为 0。
 
 ---
 
@@ -47,7 +52,7 @@ $$\Sigma = B F B^\top + \Delta$$
 | $F$       | $(K \times K)$  | 因子协方差矩阵（正定）              |
 | $\Delta$  | $(N \times N)$  | 特质风险矩阵（对角矩阵）             |
 | $N$       | —               | 股票数量                     |
-| $K$       | —               | 因子数量 = 16（风格）+ Country + 30（行业）= 47 |
+| $K$       | —               | S=20+Country+30=51；L=16+Country+30=47 |
 
 ### 3.2 组合风险分解
 
@@ -116,29 +121,41 @@ $\|w-w_0\|_1\le T_{\max}+(1-\mathbf{1}^\top w_0)$。
 |---------------|------------|-----------------------------------------------|
 | `NORMAL`      | 正常交易       | 无特殊限制                                         |
 | `SUSPENDED`   | 停牌         | 有持仓：$w_i = w_{\text{prev},i}$（冻结，不计换手）；无持仓：$w_i = 0$ |
-| `LIMIT_UP`    | 涨停（无法买入）   | $w_i \leq w_{0,i}$（只能减仓或持有）                   |
-| `LIMIT_DOWN`  | 跌停（无法卖出）   | $w_i \geq w_{0,i}$（只能加仓或持有，实际通常视为 SUSPENDED） |
+| `LIMIT_UP`    | T 日涨停      | 不限制目标；执行日涨停时仅阻断买入                         |
+| `LIMIT_DOWN`  | T 日跌停      | 不限制目标；执行日跌停时仅阻断卖出                         |
 | `NEW_LISTING` | 上市首日/次新股  | $w_i = 0$（禁止持仓，规避炒作风险）                        |
 
 ### 5.2 目标权重与真实成交账本
 
-每个调仓日先把上一目标从 T+1 起逐日送入成交账本，再以账本中的**实际持仓**作为
-本期 $w_{prev}$ 优化。优化器输出的是新目标权重，不是成交后的持仓。
+候选调仓日只有在成功生成并提交新目标后才成为**有效调仓日**。此时旧目标只执行到
+前一交易日，调仓日直接取消其 pending 状态、不再尝试旧单，当日仅按真实股数估值；
+收盘以账本中的**实际持仓**作为本期 $w_{prev}$ 并提交新目标，最早在下一交易日
+T+1 执行。若快照、风险覆盖或求解失败导致没有新权重行，则该日不构成有效调仓，
+旧目标保持激活并正常尝试。优化器输出的是目标权重，不是成交后的持仓。
 
 **停牌冻结口径**：
-- 停牌且有持仓 → $w_i = w_{\text{prev},i}$（冻结），不产生卖单，不计换手，不释放现金；
+- T 日停牌且有持仓 → $w_i = w_{\text{prev},i}$，目标后处理不再改变该值；成交账本把
+  股数冻结到本目标结束，即使 T+1 复牌也不产生订单；
 - 停牌且无持仓 → $w_i = 0$，维持原状。
 
-真实成交按 T+1 VWAP 先卖后买。涨停买单、跌停卖单、停牌双向订单不会被丢弃；
-账本在后续交易日按“当前实际持仓 → 最新目标”重新计算差额并继续尝试。若下一次调仓
-产生新目标，则以新目标替换旧的未完成目标。停牌期间用最近有效价格估值，NAV 不断裂。
+真实成交按 T+1 VWAP 先卖后买。账本为每只股票维护 `FROZEN / PENDING_SELL /
+PENDING_BUY / FILLED / EXPIRED` 状态。每个执行日只对 pending 股票按最新 NAV 和
+原始目标权重重算差额；已完整成交的股票立即锁定，不因随后价格漂移再次交易。
+
+涨停阻断买入、跌停阻断卖出，停牌或无有效 VWAP 阻断双向；这些执行日仍消耗一次
+尝试。订单最多尝试 T+1、T+2、T+3：T+3 执行后残余订单转为 `EXPIRED`，不再交易
+直到下一次调仓。现金不足时，可交易买单按需求同比例部分成交并保持 pending；没有
+已实现卖出且没有现金时不买。新目标提交时重置股票状态和三日尝试计数，其 T+1
+从下一交易日开始。停牌期间用最近有效价格估值，NAV 不断裂。
 
 **掉池/次新/ST 持仓票（sell_only 口径）**：`filter_universe` 将掉出候选池但当日有行情且
 有持仓的股票携带入优化域（`MarketSnapshot.sell_only=True`），优化器施加 $w_i \le w_{\text{prev},i}$，
 允许正常减仓并计换手，禁止加仓。实际持仓中缺少当日行情的票（退市/长期停牌滞留）
-不进优化域，按场外滞留资产处理并告警，其余部分正常优化——账本只按真实现金成交，
-不会把滞留市值误当现金再分配。优化目标提交前会清除 <1e-6 的求解器数值粉尘并重归一，
-避免账本买入微量仓位（此类仓位退市后即成滞留资产）。
+不进优化域，但按最近有效价格保留在真实账本中并告警：股数不变、不释放现金，也不
+清零其权重或重新归一化其余目标。其余部分正常优化，账本只按真实现金成交，不会把
+滞留市值误当现金再分配。冻结权重精确保留且不再二次归一化；预算超额只向下扣减
+非冻结权重。单票 <1e-6 的求解器粉尘仅在累计也 ≤1e-6 时清零，否则保留，
+避免改变冻结仓位、放大上限约束或累计破坏下限约束；微小预算缺口保留为现金。
 
 ---
 
@@ -148,7 +165,7 @@ $\|w-w_0\|_1\le T_{\max}+(1-\mathbf{1}^\top w_0)$。
 hqopt/
 ├── data/
 │   ├── real_adapter.py     # parquet 面板 → MarketSnapshot
-│   ├── benchmark.py        # 指数成分权重（默认官方权重，缺则分级靠档重构）
+│   ├── benchmark.py        # 官方快照 PIT 每日漂移（异常回退分级靠档重构）
 │   ├── index_close.py      # 官方指数收盘价加载（回测基准）
 │   ├── clickhouse_db.py    # ClickHouse 只读连接层
 │   └── generator.py        # 合成数据/快照构件
@@ -157,18 +174,22 @@ hqopt/
 │   └── schema.py           # 行情字段定义
 ├── risk/
 │   ├── cne6_risk.py        # CNE6 因子风险模型（暴露 X / 协方差 F / 特质 Δ）
+│   │                       #   构造时传 query_dates 只加载所需调仓日截面
 │   └── attribution_data.py # 因子收益 f(t) / 个股特质收益 u(t) 加载器（收益归因用）
 ├── optimizer/
+│   ├── _common.py          # 两优化器共用：交易状态掩码/换手项/求解降级/结果基类
 │   ├── alpha_max.py        # 量化选股 QP 优化器
 │   └── index_enhance.py    # 指数增强 QP 优化器
 ├── backtest/
 │   ├── engine.py           # 真实执行回测（T+1 VWAP/涨跌停/成本）+ 绩效指标
+│   │                       #   run() = 对齐 → _replay_days 逐日重放 → 指标/统计
 │   └── report.py           # Plotly HTML 报告
 ├── analysis/
 │   ├── attribution.py      # 收益归因（风格/行业/Country/特质分解，Carino多期链接）
 │   └── run.py              # 权重→归因，供 hqopt attribute 复用
 └── pipeline/
-    ├── batch_optimize.py   # 逐期批量优化（两策略）
+    ├── batch_optimize.py   # 逐期批量优化（两策略），三段式：
+    │                       #   _prepare_inputs → _run_periods → _publish_outputs
     └── universe.py         # 候选池过滤 / 成本向量 / 合成 alpha
 ```
 
@@ -184,11 +205,12 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
   → MarketSnapshot                         → 暴露 X / 协方差 F / 特质 Δ / style_loading
   （tickers/行业/ADV/状态/市值/成分）              │
     │            ┌───────── Alpha 因子（alphas/*.parquet）
-    ▼            ▼          │
+    ▼            ▼          │  get_alpha_for_date：asof + 陈旧度 + 截面 z-score
   filter_universe(prev_holdings)  ──►│   # 候选池 ∪ 上期持仓（carry=sell_only）
     │                                ▼
     └────────────────►  optimizer（alpha_max / index_enhance, cvxpy）
-                                     │  约束：预算/上限(frozen豁免)/行业/风格/换手/涨跌停/冻结/sell_only
+                                     │  共用 _common：状态掩码/换手项/求解降级
+                                     │  约束：预算/上限(frozen豁免)/行业/风格/换手/冻结/sell_only
                             ▼
                     逐期权重矩阵 weight_df
                             │
@@ -206,15 +228,53 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
 
 1. **风险项两档**：`risk_aversion` 设置时用 CNE6 真因子风险 `λ·(active'XFX'active+δ'active²)`；否则退回 L2 偏离惩罚 `γ·‖w−w_bm‖²`。
 2. **成交状态闭环**：
-   - 每期优化前先推进实际成交账本，`w_prev` 使用实际成交持仓，不使用上一期目标权重。
-   - 停牌有持仓 → 冻结 `w=w_prev`（不计换手）；停牌无持仓 → `w=0`。
+   - 只有成功生成并提交新目标才形成有效调仓日；旧目标只推进到此前一交易日，
+     有效调仓日直接取消其 pending 状态、仅估值，不再尝试旧目标。
+   - `w_prev` 使用实际成交持仓，不使用上一期目标权重。收盘提交新目标并重置状态和
+     计数，下一交易日作为新目标 T+1 开始三次尝试。
+   - 候选调仓日若没有生成新权重行，则旧目标保持激活并在该日正常尝试。
+   - T 日停牌有持仓 → 目标 `w=w_prev` 且整期冻结股数；停牌无持仓 → `w=0`。
    - 掉池/次新/ST 有持仓 → sell_only `w≤w_prev`（卖出计换手）；无持仓 → `w=0`。
-   - 涨停 `w≤w_prev`、跌停 `w≥w_prev`；alpha 对 frozen/zero/sell_only 均置 0。
-   - 不可成交订单逐日重试；新目标替换旧的未完成目标；现金作为权重缺口原样反馈给优化器。
-3. **风险覆盖保护**：未覆盖股票只卖不买；指数基准覆盖率低于阈值则跳过该期并告警，不中断整段回测。
+   - T 日涨跌停不约束目标；执行日涨停仅阻断买入、跌停仅阻断卖出。
+   - 只重试 pending 股票，已成交股票锁定；普通 pending 按最新差额决定方向，
+     sell_only 可继续卖但绝不反向买；最多尝试 T+1/T+2/T+3，残余订单过期。
+   - 先卖后买，现金不足时可交易买单同比例部分成交；现金作为权重缺口原样反馈给优化器。
+   - 常规 `weights.parquet` 保存 `batch_execution_stats.json`；自定义权重文件保存
+     `<weights stem>.batch_execution_stats.json`，同目录多个 bundle 互不覆盖。统计同时
+     保存成交状态、优化成功/失败期数、`alpha_quality` 和 `benchmark_quality`
+     （快照 as-of、陈旧自然日数、T+1 生效日、漂移/回退原因）。官方快照默认最多
+     陈旧 30 个自然日，超限回退重构。写统计
+     前推进到回测结束日；回测另存 `execution_stats.json`，归因另存
+     `attribution_execution_stats.json`。
+   - 批量 bundle 的三份产物先写 sibling 临时文件，再创建
+     `<weights stem>.bundle.in_progress`；旧 manifest 失效后依次原子替换 sidecar、
+     对应统计、weights，manifest v2 最后原子发布并绑定三者 SHA-256，成功后删除标记。
+     正式替换全程持权重绝对路径对应的跨进程独占锁；回测/归因从校验到读完
+     weights+sidecar 全程持同路径共享锁，避免混读与双 publisher 交错。读取端对
+     发布中、缺失或错配的批量 bundle fail-closed；manifest v1 保持兼容。完全没有
+     sidecar/manifest/marker 的外部权重仅告警运行，只要存在其中任一配套文件或标记，
+     就必须满足相应 bundle 契约。
+3. **风险覆盖保护**：未覆盖股票只卖不买；指数基准覆盖率低于阈值则跳过该期并告警，
+   不生成新权重行，旧目标保持激活并在当日正常尝试，不中断整段回测。
 4. **流动性为软惩罚（非硬约束）**：通过 `turnover_penalty` + 个股冲击成本向量（基于 ADV）软性压制换手，未实现 ADV 参与率硬约束。
-5. **求解器**：优先 CLARABEL，失败降级 SCS 兜底。
-6. **收益归因是独立分析层，不反向影响优化**：归因复用成交账本，把目标权重重放为
-   逐日实际权重，再结合 ClickHouse `cne6_risk.factor_return/specific_return` 事后拆解
+5. **求解器**：优先 CLARABEL，失败降级 SCS 兜底。两个优化器共用
+   `optimizer/_common.py`（交易状态掩码、个股上限、换手项、求解降级、结果基类），
+   只在目标函数与基准相关约束上分叉，避免执行语义修正只改了一侧。
+6. **Alpha 可信度前置校验**（`pipeline/universe.get_alpha_for_date`）：按 `<= 调仓日`
+   取 as-of 截面（面板 `date` 语义为信号可得日，故不构成前视），并做三件事——
+   文件型 Alpha 默认最多陈旧 15 个自然日，超 `alpha.max_staleness_days` 跳过该期；
+   常量、全零或零方差截面同样跳过；其余有效截面在优化域内做 z-score。标准化是
+   必需项而非润色：α 与风险/成本系数量纲耦合，同一因子排序乘 100 倍
+   就能把分散组合压成单票全仓。面板整体晚于回测区间直接报错，零覆盖期跳过；
+   质量统计随 batch bundle 持久化并由 manifest 绑定。
+7. **风险面板按需加载**：`CNE6RiskModel(query_dates=...)` 只读回测真正 as-of 命中的
+   调仓日截面并预先分区。完整暴露面板约 700 万行 × 50 列，整表常驻峰值内存
+   约 3.7GB；按需加载在 155 期回测下降到约 1.5GB，单期查询由 ~4.8ms 降到 ~1.4ms。
+   不传 `query_dates` 时退回整表加载（行为与优化前一致）。
+8. **收益归因是独立分析层，不反向影响优化**：归因复用成交账本，把目标权重重放为
+   逐日实际权重，再结合 ClickHouse `test_barra_cne6_gao` 对应 S/L 的
+   `factor_return_* / specific_return_*` 事后拆解
    超额收益。方法与残差自检的已知局限见
    [method.md §9](method.md#9-收益归因return-attribution)。
+9. **精确重放边界**：从调仓周期中途裁剪权重并以全现金启动，无法恢复此前股数和
+   pending/filled 状态；当前接口不支持载入完整 checkpoint，精确重放必须从策略起点开始。

@@ -2,7 +2,7 @@
 # 指数增强（index_enhance）默认配置
 #   默认中证1000增强，所有约束相对基准。hqopt run 跑此档。
 #   参数依据见 docs/method.md（§4 默认参数、§5 风格约束建议）。
-#   基准权重默认用官方成分权重（缺则 free_mv 重构），见操作指南数据准备。
+#   基准权重默认用官方快照的 PIT 每日漂移（异常回退 free_mv 重构），见操作指南。
 # ============================================================================
 strategy: index_enhance
 index: zz1000             # 基准指数：中证1000（可切 hs300 / zz500）
@@ -41,7 +41,8 @@ optimizer:
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
   active_weight_upper: 0.01     # 单票主动偏离上限 |w_i-w_bm_i| ≤ δ，null=不约束；典型值 0.01~0.03
   weight_diff_l2_bound: null    # 可选：‖w-w_bm‖₂ 硬约束上限，null=不约束
-  # benchmark_weight_source: official  # 基准权重来源：official(默认,官方权重) / reconstruct(纯 free_mv 重构)
+  benchmark_weight_source: official_drift  # 默认：官方快照+后复权价格漂移；可选 official_frozen / reconstruct
+  benchmark_max_snapshot_age_days: 30  # official_drift 快照最多陈旧30自然日；超限回退 reconstruct
   # cne6_data_dir: data/barra_cne6_L   # 可选：改用长周期 CNE6L 面板（默认短周期 S）
 
 alpha:
@@ -49,6 +50,8 @@ alpha:
   synthetic: true            # 文件本身由未来收益构造；强制终端/目录/HTML 三重水印
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
   path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
+  standardize: true          # 优化域内截面 z-score；关掉则 risk_aversion 等系数随因子量纲漂移
+  max_staleness_days: 15     # 10交易日换仓约对应15自然日；超限跳过，禁止无限复用旧信号
 
 execution:
   cost_buy: 0.001           # 买入费率 1‰

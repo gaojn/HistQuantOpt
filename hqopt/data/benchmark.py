@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+import logging
+from bisect import bisect_right
 from datetime import date
 from pathlib import Path
 
@@ -41,6 +43,58 @@ from hqopt.io.data_panel import load_panel
 DEFAULT_OFFICIAL_PATH = (
     Path(__file__).resolve().parents[2] / "data" / "index_weight" / "official_weight.parquet"
 )
+
+logger = logging.getLogger(__name__)
+
+OFFICIAL_DRIFT_SOURCE = "official_drift"
+OFFICIAL_FROZEN_SOURCE = "official_frozen"
+RECONSTRUCT_SOURCE = "reconstruct"
+DEFAULT_MAX_SNAPSHOT_AGE_DAYS = 30
+_SOURCE_ALIASES = {"official": OFFICIAL_DRIFT_SOURCE}
+_VALID_SOURCES = {
+    OFFICIAL_DRIFT_SOURCE,
+    OFFICIAL_FROZEN_SOURCE,
+    RECONSTRUCT_SOURCE,
+    *_SOURCE_ALIASES,
+}
+
+
+class BenchmarkPriceCoverageError(ValueError):
+    """官方快照成分缺少锚点或目标日价格，无法安全漂移。"""
+
+
+def drift_official_weights(
+    snapshot_weights: pd.Series,
+    anchor_prices: pd.Series,
+    target_prices: pd.Series,
+) -> pd.Series:
+    """按后复权价格比把官方快照权重漂移到目标日。
+
+    本函数只做确定性数学变换，不读取数据、不选择快照。运行时和每日导出必须
+    共用它，避免形成两套漂移口径。调用方负责保证价格均来自 ``<= target``。
+    """
+    base = pd.to_numeric(snapshot_weights, errors="coerce").dropna()
+    base = base[base > 0]
+    if base.empty:
+        raise ValueError("官方快照没有正权重")
+    base = base / base.sum()
+
+    p0 = pd.to_numeric(anchor_prices.reindex(base.index), errors="coerce")
+    p1 = pd.to_numeric(target_prices.reindex(base.index), errors="coerce")
+    valid = p0.gt(0) & p1.gt(0) & np.isfinite(p0) & np.isfinite(p1)
+    if not bool(valid.all()):
+        missing = base.index[~valid].tolist()
+        preview = ", ".join(missing[:5])
+        suffix = "..." if len(missing) > 5 else ""
+        raise BenchmarkPriceCoverageError(
+            f"{len(missing)} 只官方成分缺少有效漂移价格：{preview}{suffix}"
+        )
+
+    drifted = base * (p1 / p0)
+    total = float(drifted.sum())
+    if not np.isfinite(total) or total <= 1e-12:
+        raise BenchmarkPriceCoverageError("漂移后权重和无效")
+    return (drifted / total).rename("bm_weight")
 
 
 class IndexBenchmarkWeights:
@@ -66,34 +120,61 @@ class IndexBenchmarkWeights:
         index: str = "zz500",
         panel: pl.DataFrame | None = None,
         cache_dir: Path | str | None = None,
-        source: str = "official",
+        source: str = OFFICIAL_DRIFT_SOURCE,
         official_path: Path | str | None = None,
+        max_snapshot_age_days: int | None = DEFAULT_MAX_SNAPSHOT_AGE_DAYS,
     ) -> None:
         """
         Parameters
         ----------
         source : str
             基准权重来源：
-            - "official"（默认）：用 wind_db 导出的官方成分权重（月度快照，
-              按调仓日 asof 取 ≤当日最近快照）；官方未覆盖的日期/指数
-              自动回退到 free_mv 分级靠档重构。
+            - "official_drift"（默认）：取 ≤目标日最近官方快照，并按后复权
+              收盘价漂移；成分变化、价格缺失或官方未覆盖时回退重构。
+            - "official_frozen"：旧口径，月度快照之间保持权重不变。
+            - "official"：兼容别名，等同 "official_drift"。
             - "reconstruct"：始终用 free_mv 重构（不读官方权重）。
         official_path : Path | str | None
             官方权重 parquet 路径，None 用默认 data/index_weight/official_weight.parquet。
+        max_snapshot_age_days : int | None
+            ``official_drift`` 允许的官方快照最大陈旧自然日数，默认 30。
+            超过后告警并回退重构；None 显式关闭限制。兼容用
+            ``official_frozen`` 不应用此限制。
         """
         if index not in self._INDEX_COL:
             raise ValueError(f"index 须为 {list(self._INDEX_COL)} 之一")
-        if source not in ("official", "reconstruct"):
-            raise ValueError("source 须为 'official' 或 'reconstruct'")
+        if source not in _VALID_SOURCES:
+            raise ValueError(
+                "source 须为 'official_drift'、'official_frozen' 或 'reconstruct'"
+            )
+        if (
+            max_snapshot_age_days is not None
+            and (
+                isinstance(max_snapshot_age_days, bool)
+                or not isinstance(max_snapshot_age_days, int)
+                or max_snapshot_age_days < 0
+            )
+        ):
+            raise ValueError("max_snapshot_age_days 必须是非负整数或 None")
         self.index = index
         self._col = self._INDEX_COL[index]
         self._cache_dir = Path(cache_dir) if cache_dir else None
         self._panel = panel
         self._weight_cache: pd.DataFrame | None = None   # (date, ticker) → weight，free_mv 重构
-        self.source = source
+        self.source = _SOURCE_ALIASES.get(source, source)
+        self.max_snapshot_age_days = max_snapshot_age_days
         self._official_path = Path(official_path) if official_path else DEFAULT_OFFICIAL_PATH
         self._official_cache: pd.DataFrame | None = None  # date × code，官方权重
         self._official_loaded = False
+        self._drift_price_cache: pd.DataFrame | None = None
+        self._roster_cache: pd.DataFrame | None = None
+        self._prepared_range: tuple[date, date] | None = None
+        self._trading_dates: list[date] = []
+        self._audit_method_by_period: dict[str, str] = {}
+        self._audit_anchor_by_period: dict[str, str] = {}
+        self._audit_snapshot_age_by_period: dict[str, int] = {}
+        self._audit_effective_date_by_period: dict[str, str] = {}
+        self._audit_fallback_by_period: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -119,27 +200,70 @@ class IndexBenchmarkWeights:
         pd.Series
             index=ticker，value=权重（合计≈1）
         """
-        # 优先官方权重（月度快照，asof 取 ≤target 最近日）
-        if self.source == "official":
+        # 优先官方权重：旧模式冻结，新模式按后复权价格漂移。
+        if self.source in (OFFICIAL_DRIFT_SOURCE, OFFICIAL_FROZEN_SOURCE):
             oc = self._get_official_cache()
             if oc is not None and len(oc):
-                avail = [d for d in oc.index if d <= target_date]
-                if avail:
-                    w = oc.loc[avail[-1]].dropna()
-                    return self._finalize(w, tickers)
+                anchor = self._official_anchor(target_date, oc)
+                if anchor is not None:
+                    snapshot = oc.loc[anchor].dropna()
+                    snapshot_age = (target_date - anchor).days
+                    if (
+                        self.source == OFFICIAL_DRIFT_SOURCE
+                        and self.max_snapshot_age_days is not None
+                        and snapshot_age > self.max_snapshot_age_days
+                    ):
+                        fallback_reason = (
+                            "snapshot_stale: "
+                            f"age_days={snapshot_age}, "
+                            f"limit_days={self.max_snapshot_age_days}"
+                        )
+                        self._warn_fallback(target_date, fallback_reason)
+                        self._record_audit(
+                            target_date,
+                            RECONSTRUCT_SOURCE,
+                            anchor,
+                            fallback_reason,
+                        )
+                        return self._reconstructed_weights(target_date, tickers)
+
+                    if self.source == OFFICIAL_FROZEN_SOURCE:
+                        self._record_audit(
+                            target_date, OFFICIAL_FROZEN_SOURCE, anchor
+                        )
+                        return self._finalize(snapshot, tickers)
+
+                    fallback_reason = self._drift_fallback_reason(
+                        target_date, snapshot
+                    )
+                    if fallback_reason is None:
+                        if anchor == target_date:
+                            self._record_audit(
+                                target_date, "official_snapshot", anchor
+                            )
+                            return self._finalize(snapshot, tickers)
+                        try:
+                            w = self._drift_weight(target_date, anchor, snapshot)
+                        except BenchmarkPriceCoverageError as exc:
+                            fallback_reason = f"price_coverage: {exc}"
+                        else:
+                            self._record_audit(
+                                target_date, OFFICIAL_DRIFT_SOURCE, anchor
+                            )
+                            return self._finalize(w, tickers)
+
+                    self._warn_fallback(target_date, fallback_reason)
+                    self._record_audit(
+                        target_date, RECONSTRUCT_SOURCE, anchor, fallback_reason
+                    )
+                    return self._reconstructed_weights(target_date, tickers)
             # 官方未覆盖（早于起点 / 无该指数）→ 回退 free_mv 重构
+            reason = "official_snapshot_unavailable"
+            self._record_audit(target_date, RECONSTRUCT_SOURCE, None, reason)
 
-        cache = self._get_or_build_cache()
-
-        if target_date not in cache.index:
-            # 找最近一个早于 target_date 的日期
-            avail = cache.index[cache.index <= target_date]
-            if len(avail) == 0:
-                raise ValueError(f"无 {target_date} 之前的基准权重数据")
-            target_date = avail[-1]
-
-        w = cache.loc[target_date].dropna()
-        return self._finalize(w, tickers)
+        if self.source == RECONSTRUCT_SOURCE:
+            self._record_audit(target_date, RECONSTRUCT_SOURCE, None)
+        return self._reconstructed_weights(target_date, tickers)
 
     @staticmethod
     def _finalize(w: pd.Series, tickers: list[str] | None) -> pd.Series:
@@ -183,12 +307,44 @@ class IndexBenchmarkWeights:
 
         在批量优化前调用，避免每次 get_weights() 触发 I/O。
         """
-        if panel is not None:
+        if panel is not None and panel is not self._panel:
             self._panel = panel
-        if self.source == "official":
-            self._get_official_cache()   # 预热官方；free_mv 重构兜底惰性按需
+            self._weight_cache = None
+            self._drift_price_cache = None
+            self._roster_cache = None
+            self._prepared_range = None
+        if self.source in (OFFICIAL_DRIFT_SOURCE, OFFICIAL_FROZEN_SOURCE):
+            self._get_official_cache()
+            if self.source == OFFICIAL_DRIFT_SOURCE:
+                self._prepare_drift_inputs(start_date, end_date)
         else:
             self._weight_cache = self._build_weight_matrix(start_date, end_date)
+
+    def audit_summary(self) -> dict[str, object]:
+        """返回可直接写入运行统计 JSON 的基准权重审计摘要。"""
+        fallback = self._audit_fallback_by_period
+        roster_dates = [d for d, reason in fallback.items() if reason == "roster_changed"]
+        stale_dates = [
+            d for d, reason in fallback.items()
+            if reason.startswith("snapshot_stale:")
+        ]
+        return {
+            "source": self.source,
+            "price_field": "adj_close" if self.source == OFFICIAL_DRIFT_SOURCE else None,
+            "max_snapshot_age_days": self.max_snapshot_age_days,
+            "fallback_period_count": len(fallback),
+            "roster_change_period_count": len(roster_dates),
+            "stale_snapshot_period_count": len(stale_dates),
+            "method_by_period": dict(self._audit_method_by_period),
+            "snapshot_as_of_by_period": dict(self._audit_anchor_by_period),
+            "snapshot_age_days_by_period": dict(
+                self._audit_snapshot_age_by_period
+            ),
+            "effective_date_by_period": dict(
+                self._audit_effective_date_by_period
+            ),
+            "fallback_reason_by_period": dict(fallback),
+        }
 
     # ------------------------------------------------------------------
     # Private
@@ -210,6 +366,168 @@ class IndexBenchmarkWeights:
         wide.index = pd.to_datetime(wide.index).date
         self._official_cache = wide.sort_index()
         return self._official_cache
+
+    @staticmethod
+    def _official_anchor(target_date: date, cache: pd.DataFrame) -> date | None:
+        dates = list(cache.index)
+        pos = bisect_right(dates, target_date) - 1
+        return dates[pos] if pos >= 0 else None
+
+    def _prepare_drift_inputs(self, start_date: date, end_date: date) -> None:
+        """构建 PIT 价格与每日成分缓存；只允许向前填充。"""
+        if self._prepared_range == (start_date, end_date):
+            return
+        if self._panel is None:
+            return
+        required = {"date", "code", "adj_close", self._col}
+        missing = required - set(self._panel.columns)
+        if missing:
+            raise KeyError(f"官方权重漂移所需行情列缺失：{sorted(missing)}")
+
+        panel = self._panel.select(
+            ["date", "code", "adj_close", self._col]
+        ).with_columns(pl.col("date").cast(pl.Date))
+        self._trading_dates = (
+            panel.select("date").unique().sort("date")["date"].to_list()
+        )
+        price_pdf = panel.select(["date", "code", "adj_close"]).to_pandas()
+
+        oc = self._get_official_cache()
+        if oc is not None and len(oc):
+            anchor = self._official_anchor(start_date, oc)
+            known_dates = set(price_pdf["date"])
+            if anchor is not None and anchor not in known_dates:
+                try:
+                    extra = load_panel(
+                        anchor,
+                        anchor,
+                        columns=["adj_close"],
+                        cache_dir=self._cache_dir,
+                        add_adj_vwap=False,
+                    ).select(["date", "code", "adj_close"])
+                except (FileNotFoundError, KeyError):
+                    extra = pl.DataFrame()
+                if not extra.is_empty():
+                    price_pdf = pd.concat(
+                        [price_pdf, extra.to_pandas()], ignore_index=True
+                    )
+
+        prices = price_pdf.pivot(index="date", columns="code", values="adj_close")
+        prices.index = pd.to_datetime(prices.index).date
+        self._drift_price_cache = prices.sort_index().ffill()
+
+        roster_pdf = panel.select(["date", "code", self._col]).to_pandas()
+        roster = roster_pdf.pivot(index="date", columns="code", values=self._col)
+        roster.index = pd.to_datetime(roster.index).date
+        self._roster_cache = roster.sort_index().fillna(0).astype(bool)
+        self._prepared_range = (start_date, end_date)
+
+    def _ensure_drift_inputs(self, target_date: date) -> None:
+        if self._drift_price_cache is not None and self._roster_cache is not None:
+            return
+        if self._panel is None:
+            raise RuntimeError(
+                "official_drift 需要传入含 adj_close 与指数成分标记的行情 panel，"
+                "或先调用 precompute()"
+            )
+        dates = self._panel.select("date").unique().sort("date")["date"].to_list()
+        self._prepare_drift_inputs(dates[0], max(dates[-1], target_date))
+
+    def _drift_fallback_reason(
+        self,
+        target_date: date,
+        snapshot: pd.Series,
+    ) -> str | None:
+        self._ensure_drift_inputs(target_date)
+        assert self._roster_cache is not None
+        if target_date not in self._roster_cache.index:
+            return "target_roster_unavailable"
+        target_row = self._roster_cache.loc[target_date]
+        target_roster = set(target_row.index[target_row.values])
+        anchor_roster = set(snapshot[snapshot > 0].index)
+        if not target_roster:
+            return "target_roster_empty"
+        if target_roster != anchor_roster:
+            return "roster_changed"
+        return None
+
+    def _drift_weight(
+        self,
+        target_date: date,
+        anchor: date,
+        snapshot: pd.Series,
+    ) -> pd.Series:
+        self._ensure_drift_inputs(target_date)
+        assert self._drift_price_cache is not None
+        prices = self._drift_price_cache
+        if anchor not in prices.index:
+            raise BenchmarkPriceCoverageError(f"缺少官方锚点日 {anchor} 行情")
+        avail = prices.index[prices.index <= target_date]
+        if len(avail) == 0:
+            raise BenchmarkPriceCoverageError(f"缺少目标日 {target_date} 之前行情")
+        price_date = avail[-1]
+        return drift_official_weights(
+            snapshot,
+            prices.loc[anchor],
+            prices.loc[price_date],
+        )
+
+    def _reconstructed_weights(
+        self,
+        target_date: date,
+        tickers: list[str] | None,
+    ) -> pd.Series:
+        cache = self._get_or_build_cache()
+        resolved = target_date
+        if resolved not in cache.index:
+            avail = cache.index[cache.index <= resolved]
+            if len(avail) == 0:
+                raise ValueError(f"无 {target_date} 之前的基准权重数据")
+            resolved = avail[-1]
+        return self._finalize(cache.loc[resolved].dropna(), tickers)
+
+    def _record_audit(
+        self,
+        target_date: date,
+        method: str,
+        anchor: date | None,
+        fallback_reason: str | None = None,
+    ) -> None:
+        key = target_date.isoformat()
+        self._audit_method_by_period[key] = method
+        if anchor is not None:
+            self._audit_anchor_by_period[key] = anchor.isoformat()
+            self._audit_snapshot_age_by_period[key] = (
+                target_date - anchor
+            ).days
+        effective_date = self._next_trading_date(target_date)
+        if effective_date is not None:
+            self._audit_effective_date_by_period[key] = (
+                effective_date.isoformat()
+            )
+        if fallback_reason is not None:
+            self._audit_fallback_by_period[key] = fallback_reason
+
+    def _next_trading_date(self, target_date: date) -> date | None:
+        """返回面板中严格晚于 T 的首个交易日，用于标记 T 收盘权重的生效日。"""
+        if not self._trading_dates and self._panel is not None:
+            self._trading_dates = (
+                self._panel.select("date")
+                .unique()
+                .sort("date")["date"]
+                .to_list()
+            )
+        pos = bisect_right(self._trading_dates, target_date)
+        if pos >= len(self._trading_dates):
+            return None
+        return self._trading_dates[pos]
+
+    def _warn_fallback(self, target_date: date, reason: str) -> None:
+        key = target_date.isoformat()
+        if key not in self._audit_fallback_by_period:
+            logger.warning(
+                "[%s] 官方指数权重漂移回退 reconstruct：%s", target_date, reason
+            )
 
     def _get_or_build_cache(self) -> pd.DataFrame:
         if self._weight_cache is not None:

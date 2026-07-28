@@ -1,9 +1,9 @@
 from hqopt.research.signal_grid import (
-    SignalGridRunner,
-    run_grid,
+    DEFAULT_DECAY_LIST,
     DEFAULT_IC_LIST,
     DEFAULT_ICIR_LIST,
-    DEFAULT_DECAY_LIST,
+    SignalGridRunner,
+    run_grid,
 )
 
 __all__ = [

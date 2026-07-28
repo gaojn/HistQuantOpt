@@ -21,12 +21,13 @@
       alphas/_summary.csv —— 各因子的输入参数与实测 IC/ICIR/自相关/换手
 
 运行：
-    cd /Users/guoguo/Documents/HistQuantOpt
+    cd /Users/guoguo/Documents/HistQuant/HistQuantOpt
     python scripts/build_alphas_vwap5.py
 """
 
 import os
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import date
@@ -36,8 +37,10 @@ import pandas as pd
 
 from hqopt.io.data_panel import load_panel
 from hqopt.research.signal_grid import (
+    DEFAULT_DECAY_LIST,
+    DEFAULT_IC_LIST,
+    DEFAULT_ICIR_LIST,
     SignalGridRunner,
-    DEFAULT_IC_LIST, DEFAULT_ICIR_LIST, DEFAULT_DECAY_LIST,
 )
 
 DATA_START = date(2020, 1, 1)

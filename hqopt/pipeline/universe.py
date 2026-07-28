@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
@@ -302,14 +302,107 @@ def load_alpha_panel(path: str | Path) -> pd.DataFrame:
     return alpha_df.sort_index()
 
 
+@dataclass(frozen=True)
+class AlphaSlice:
+    """某调仓日实际取用的 Alpha 截面及其可信度元数据。"""
+
+    values: np.ndarray      # (N,) 对齐 tickers 的 alpha 向量
+    as_of: date             # 实际取用的 alpha 面板日期（≤ 请求日）
+    staleness_days: int     # 请求日 − as_of 的自然日数，0 表示当日信号
+    n_valid: int            # 优化域内有非缺失 alpha 的股票数
+    standardized: bool      # 是否已做截面 z-score
+
+
+class AlphaZeroVarianceError(ValueError):
+    """Alpha 截面没有横截面区分度，继续优化会静默退化为纯风险最小化。"""
+
+
 def get_alpha_for_date(
     alpha_df: pd.DataFrame,
     target_date: date,
     tickers: list[str],
-) -> np.ndarray:
-    """取最近可用日期的 Alpha，对齐到 tickers。"""
+    *,
+    max_staleness_days: int | None = None,
+    standardize: bool = True,
+    min_valid: int = 1,
+) -> AlphaSlice | None:
+    """取 ≤ target_date 的最近一期 Alpha，对齐到 tickers。
+
+    Alpha 面板的 `date` 语义是**信号可得日**：T 日的行必须只用 T 日及之前的
+    信息构造。优化器在 T 日收盘后据此下单、T+1 成交，因此取 `<= target_date`
+    不构成前视；若研究员把"预测目标日"写进 date 列，则会引入前视——这个约定
+    由 alpha 生产方保证，本函数不做（也无法做）检测。
+
+    Parameters
+    ----------
+    max_staleness_days : int | None
+        允许的最大陈旧自然日数。超过则返回 None，由调用方跳过该期，避免用
+        早已过期的信号继续"赚钱"。None（默认）不做硬限制，仅在返回值的
+        ``staleness_days`` 中如实记录，由调用方决定告警。
+    standardize : bool
+        是否对优化域内的 alpha 做截面 z-score，默认 True。目标函数
+        ``w'α − γ·R(w)`` 里 α 与风险/成本系数量纲耦合：同一因子排序，α 乘以
+        100 倍就能把 γ=0.05 下的 20 只分散组合压成 1 只全仓。标准化后
+        ``risk_aversion`` / ``turnover_penalty`` / ``diversification_penalty``
+        的默认标定才有稳定含义，缺失值填 0 也才等于"截面中性"。
+    min_valid : int
+        优化域内有效 alpha 的最少股票数，低于则视为该期不可用（返回 None）。
+        默认 1，即只拒绝"该期 Alpha 对优化域零覆盖"——那会让 alpha 恒为 0、
+        优化退化成纯风险最小化。覆盖偏低但非零的情形不在此拦截（小 universe 下
+        属正常），由调用方按覆盖率告警。
+
+    Returns
+    -------
+    AlphaSlice | None
+        None 表示该期 Alpha 不可用（过于陈旧或有效值不足），调用方应跳过。
+
+    Raises
+    ------
+    AlphaZeroVarianceError
+        有效 Alpha 截面为常量（包括全零）。这种信号没有横截面信息，调用方应
+        跳过该期；不得把全零向量继续送入优化器。
+    ValueError
+        Alpha 面板内不存在任何 ≤ target_date 的日期——通常是面板整体晚于
+        回测区间的配置错误，静默返回全零会让优化退化成纯风险最小化。
+    """
     ts = pd.Timestamp(target_date)
     avail = alpha_df.index[alpha_df.index <= ts]
     if len(avail) == 0:
-        return np.zeros(len(tickers))
-    return alpha_df.loc[avail[-1]].reindex(tickers).fillna(0.0).values.astype(float)
+        earliest = alpha_df.index.min()
+        raise ValueError(
+            f"Alpha 面板无 {target_date} 及之前的数据（最早 {earliest}）。"
+            "请检查 alpha.path 与回测区间是否匹配——返回全零 alpha 会让优化器"
+            "退化为纯风险最小化，业绩不可解释。"
+        )
+
+    as_of_ts = avail[-1]
+    staleness = (ts - as_of_ts).days
+    if max_staleness_days is not None and staleness > max_staleness_days:
+        return None
+
+    raw = alpha_df.loc[as_of_ts].reindex(tickers)
+    raw = pd.to_numeric(raw, errors="coerce").replace([np.inf, -np.inf], np.nan)
+    n_valid = int(raw.notna().sum())
+    if n_valid < min_valid:
+        return None
+
+    sigma = float(raw.std(ddof=0))
+    if not np.isfinite(sigma) or sigma <= 1e-12:
+        raise AlphaZeroVarianceError(
+            f"{target_date} 的 Alpha 截面无区分度"
+            f"（as_of={as_of_ts.date()}，有效股票={n_valid}）"
+        )
+
+    if standardize:
+        mu = float(raw.mean())
+        values = (raw - mu) / sigma
+    else:
+        values = raw
+
+    return AlphaSlice(
+        values=values.fillna(0.0).to_numpy(dtype=float),
+        as_of=as_of_ts.date(),
+        staleness_days=int(staleness),
+        n_valid=n_valid,
+        standardized=bool(standardize),
+    )
