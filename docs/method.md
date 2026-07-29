@@ -301,11 +301,14 @@ PENDING_BUY / FILLED / EXPIRED`：
 （YAML 驱动，见 [操作指南.md](操作指南.md)）。`run_batch_optimize` 内部分三段，
 需要复用其中某一段（如只做输入装配再自定义循环）可直接调用私有函数：
 
-| 阶段 | 函数 | 职责 |
-|---|---|---|
-| 一 | `_prepare_inputs(config, panel, alpha_df)` | 解析配置、加载行情/Alpha、构造账本与优化器/风险模型，产出只读 `_BatchInputs` |
-| 二 | `_run_periods(inputs)` | 逐期推进成交账本 → 构建优化域 → 取 Alpha → 求解 → 落账，产出 `_PeriodOutcome` |
-| 三 | `_publish_outputs(inputs, outcome)` | 汇总权重矩阵，原子发布 bundle（weights + sidecar + 成交统计 + 清单） |
+| 阶段 | 函数 | 实现位置 | 职责 |
+|---|---|---|---|
+| 一 | `_prepare_inputs(config, panel, alpha_df)` | `batch_optimize` | 解析配置、加载行情/Alpha、构造账本与优化器/风险模型，产出只读 `_BatchInputs` |
+| 二 | `_run_periods(inputs)` | `batch/periods.py` | 逐期推进成交账本 → 构建优化域 → 取 Alpha → 求解 → 落账，产出 `_PeriodOutcome` |
+| 三 | `_publish_outputs(inputs, outcome)` | `batch/publish.py` | 汇总权重矩阵，原子发布 bundle（weights + sidecar + 成交统计 + 清单） |
+
+三者均可从 `hqopt.pipeline.batch_optimize` 直接导入（阶段二/三已 re-export）。
+阶段一为何不能移出该模块，见 [design.md §6.1](design.md)。
 
 账本推进的游标状态收敛在 `_ExecutionWalker`：`open_signal_day` 补齐调仓日之前的
 成交、信号日只估值；未发布新目标的调仓日由 `replay_signal_day` 恢复旧目标的当日

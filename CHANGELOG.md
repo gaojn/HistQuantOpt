@@ -153,6 +153,10 @@ Country + 30个行业（47因子）。源库协方差中的空行业因子会同
 - `query_df` 对传输中断类异常（`IncompleteRead` / `RemoteDisconnected` /
   连接重置 / socket 超时）做指数退避重试（默认 4 次）；HTTP 4xx/5xx 属服务端
   确定性拒绝，不重试。此前大结果集分块导出中途断流会让已完成的工作全部作废。
+- `batch_optimize.py` 1167 → 350 行，阶段二/三拆入 `hqopt/pipeline/batch/` 包
+  （`types` / `config` / `execution_walk` / `periods` / `publish`）。阶段一因 46 处
+  `monkeypatch.setattr(batch, ...)` 打在其命名空间上而留在原模块，理由见
+  design.md §6.1。导入面不变；已验证拆分前后权重/成交统计/只卖矩阵逐位一致。
 - 补齐求解器降级路径测试（`tests/test_solver_fallback.py`）：CLARABEL 抛异常或
   返回非最优时必须真的降级 SCS，两者都失败时优化器返回零权重的不可行结果而非
   半成品向量。`optimizer/index_enhance.py` 覆盖率 63% → 72%。
