@@ -35,14 +35,14 @@ class RealMarketAdapter:
     adv_window : int
         ADV 计算窗口（交易日数），默认 20
     new_listing_days : int
-        上市不足此自然日数的股票视为次新，默认 60
+        上市不足此自然日数的股票视为次新，默认 120
     """
 
     def __init__(
         self,
         cache_dir: Path | str | None = None,
         adv_window: int = 20,
-        new_listing_days: int = 60,
+        new_listing_days: int = 120,
     ) -> None:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.adv_window = adv_window

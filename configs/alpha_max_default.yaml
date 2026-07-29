@@ -16,6 +16,7 @@ universe:
   exclude_bj: true          # 剔除北交所
   exclude_st: true          # 剔除 ST/*ST
   top_n: null               # 不按市值截断，全市场
+  new_listing_days: 120     # 次新股：上市不足此自然日数禁止持仓（list_days < 该值）
 
 optimizer:
   weight_upper: 0.01            # 单票绝对上限 1%
@@ -25,7 +26,7 @@ optimizer:
   risk_aversion: null           # CNE6 因子协方差进目标（真风险项）；置空则退回上面的 L2 惩罚
   max_turnover: 0.40            # 双边换手硬上限 40%（≈单边 20%）
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
-  # 风格绝对暴露上限（CNE6 16 风格，单位 σ）：只收紧关键公共风险，其余给 alpha 留表达空间
+  # 风格绝对暴露上限（CNE6S 20 风格（CNE6L 为 16 风格），单位 σ）：只收紧关键公共风险，其余给 alpha 留表达空间
   style_bound:
     default: 0.50               # 未列出因子的兜底
     Size: 0.20                  # 市值：防小盘下沉

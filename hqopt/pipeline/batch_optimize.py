@@ -529,11 +529,11 @@ def _build_risk_model(
     risk_aversion 设置时，因子协方差 λ·active'Σactive 进目标（真跟踪误差）；
     不设时退回 L2 偏离惩罚 tracking_penalty。
     cne6_data_dir：风险面板来源目录，默认 None → CNE6RiskModel 默认路径
-    （短周期 CNE6S，data/barra_cne6/）；传 "data/barra_cne6_L" 则改用长周期
+    （短周期 CNE6S，data/barra_cne6_S/）；传 "data/barra_cne6_L" 则改用长周期
     CNE6L 面板（hl=252，月度以上策略）。
     """
     risk_aversion = _optional_float(opt_cfg, "risk_aversion")
-    min_risk_coverage = float(opt_cfg.get("min_risk_coverage", 0.90))
+    min_risk_coverage = float(opt_cfg.get("min_risk_coverage", 0.5))
     if not 0.0 <= min_risk_coverage <= 1.0:
         raise ValueError("optimizer.min_risk_coverage 必须位于 [0, 1]")
 
@@ -542,7 +542,7 @@ def _build_risk_model(
     # 常驻约需 2.7GB，按需加载约减半）。
     risk_model = CNE6RiskModel(data_dir=cne6_data_dir, query_dates=rebal_dates)
     cov0, cov1 = risk_model.coverage
-    tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6(默认/短周期S)"
+    tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6_S(默认/短周期S)"
     mode = f"λ={risk_aversion}" if risk_aversion is not None else "L2 偏离惩罚"
     logger.info(f"\n[3a] CNE6 风险模型[{tag}]  覆盖={cov0}~{cov1}  目标风险项={mode}")
     return risk_model, risk_aversion, min_risk_coverage
@@ -640,7 +640,9 @@ def _prepare_inputs(
             panel, run_cfg.start_date, run_cfg.end_date
         ),
         ledger=ledger,
-        adapter=RealMarketAdapter(),
+        adapter=RealMarketAdapter(
+            new_listing_days=int(run_cfg.universe_cfg.get("new_listing_days", 120))
+        ),
         risk_model=risk_model,
         optimizer=optimizer,
         base_config=base_config,
@@ -715,7 +717,7 @@ def _prepare_period(
     if snapshot is None:
         return None
 
-    # 风格载荷 + 风险模型：均来自 CNE6 面板（16 风格 + 行业）。
+    # 风格载荷 + 风险模型：均来自 CNE6 面板（S 20 风格或 L 16 风格 + 行业）。
     # 暴露用于 style_active_bound 约束；risk_aversion 设置时协方差进目标。
     # 无 CNE6 覆盖的调仓日跳过。
     risk_snap = inputs.risk_model.at(rebal_date, snapshot.tickers)

@@ -9,6 +9,31 @@
 
 ## 未发布（工作区，2026-07-29）
 
+### ⚠️ 破坏性：次新股阈值 60 → 120 自然日，并开放配置
+
+`hqopt/data/real_adapter.py`、`hqopt/pipeline/batch_optimize.py`、两份默认配置
+
+`RealMarketAdapter` 的次新判定（`list_days < new_listing_days`，禁止持仓）默认由
+60 个自然日放宽到 120，并新增 `universe.new_listing_days` 配置项，不再是构造函数
+里写死的值。上市 60~120 日的股票现在同样进入 `zero`（无持仓禁开仓）/`sell_only`
+（有持仓只卖不买）。
+
+- **影响**：两条策略的优化域与权重都会变化——被排除的次新票增多，其权重转移到
+  其余候选票；净值随之变化。
+- **需重跑**：全部历史优化、回测与归因。若要保持旧口径，在配置里显式写
+  `universe.new_listing_days: 60`。
+
+### ⚠️ 破坏性：`min_risk_coverage` 默认 0.90 → 0.5
+
+`hqopt/pipeline/batch_optimize.py`、`configs/index_enhance_default.yaml`
+
+指数增强的基准 CNE6 覆盖率门槛下调。此前覆盖率低于 90% 即跳过该期优化（账本继续
+执行旧目标），2020 年初等面板缺口期会被整段跳过；下调到 50% 后这些期恢复正常优化。
+
+- **影响**：仅 `index_enhance`。此前被跳过的调仓期现在会生成新目标，权重与净值变化；
+  `alpha_max` 不读此阈值，不受影响。
+- **需重跑**：全部指数增强历史回测与归因。旧口径写 `optimizer.min_risk_coverage: 0.90`。
+
 ### ⚠️ 破坏性：CNE6S 面板目录改名 `data/barra_cne6` → `data/barra_cne6_S`
 
 `hqopt/risk/cne6_risk.py`、`hqopt/risk/attribution_data.py`、`data_manifest.yaml`、
