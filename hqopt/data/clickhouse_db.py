@@ -75,6 +75,9 @@ _TRANSIENT_ERRORS = (
 )
 _MAX_ATTEMPTS = 4
 _BACKOFF_BASE = 2.0
+# 服务端内存超限：退避 4/16/64 秒，等待并发查询释放内存
+_MEM_BACKOFF_BASE = 4.0
+_MEMORY_LIMIT_RE = re.compile(r"Code:\s*241|MEMORY_LIMIT_EXCEEDED")
 
 
 def query_df(
@@ -107,6 +110,13 @@ def query_df(
             break
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")[:800]
+            # 服务端内存超限（Code 241）取决于**并发负载**，本质是瞬时错误：
+            # 实测同一查询在他人占用 14 GiB 时失败、负载回落后成功。故与其他
+            # 4xx/5xx（确定性拒绝）区别对待，退避重试；退避比网络类更长，
+            # 给并发查询留出释放内存的时间。
+            if _MEMORY_LIMIT_RE.search(body) and attempt < max_attempts:
+                time.sleep(_MEM_BACKOFF_BASE ** attempt)
+                continue
             raise RuntimeError(f"ClickHouse 查询失败 HTTP {e.code}: {body}") from e
         except _TRANSIENT_ERRORS as e:
             if attempt == max_attempts:

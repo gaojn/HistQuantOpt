@@ -57,59 +57,77 @@ EXCLUDED_INDUSTRIES = {"", "未知"}
 # 暴露分块粒度（自然月）。服务端 56 GiB 内存为共享资源，调大有超限风险，
 # 详见 _date_ranges 的说明。
 CHUNK_MONTHS = 1
+# 分块缓存目录：支持中断续跑。区间或风格集变化时请清空本目录。
+EXPOSURE_CACHE_DIR = CACHE_DIR / "cne6_exposure_chunks"
 
 
 def validate_exposure_source() -> None:
-    """确认估计域内每个股票日恰好具有 20 个有限风格暴露。"""
+    """确认估计域内每个股票日恰好具有 20 个有限风格暴露。
+
+    与暴露拉取同样按 ``CHUNK_MONTHS`` 分块：本查询对全区间做
+    ``GROUP BY asof_date, code``，12.5 年一次聚合会在服务端并发负载偏高时
+    触发 MEMORY_LIMIT_EXCEEDED（实测 2026-07-29）。分块后逐块校验，
+    任一块不合格立即失败。
+    """
     factor_names = ", ".join(f"'{factor}'" for factor in STYLE_FACTORS_S)
-    stats = query_df(
-        f"""
-        SELECT
-            count() AS groups,
-            min(factor_count) AS min_factor_count,
-            max(factor_count) AS max_factor_count,
-            min(row_count) AS min_row_count,
-            max(row_count) AS max_row_count,
-            countIf(
-                factor_count != {len(STYLE_FACTORS_S)}
-                OR row_count != {len(STYLE_FACTORS_S)}
-            ) AS bad_groups,
-            sum(invalid_values) AS invalid_values
-        FROM (
-            SELECT
-                asof_date,
-                code,
-                uniqExact(factor_name) AS factor_count,
-                count() AS row_count,
-                countIf(NOT isFinite(zscore)) AS invalid_values
-            FROM {SOURCE_DATABASE}.factor_exposure FINAL
-            WHERE univ_flag = 1
-              AND asof_date BETWEEN '{START_DATE}' AND '{END_DATE}'
-              AND factor_name IN ({factor_names})
-            GROUP BY asof_date, code
-        )
-        """
-    )
-    if stats.height != 1:
-        raise ValueError("CNE6 factor_exposure 覆盖统计返回异常")
-    row = stats.row(0, named=True)
     expected = len(STYLE_FACTORS_S)
-    if (
-        int(row["groups"] or 0) == 0
-        or int(row["min_factor_count"] or 0) != expected
-        or int(row["max_factor_count"] or 0) != expected
-        or int(row["min_row_count"] or 0) != expected
-        or int(row["max_row_count"] or 0) != expected
-        or int(row["bad_groups"] or 0) != 0
-        or int(row["invalid_values"] or 0) != 0
+    total_groups = 0
+    for chunk_start, chunk_end in _date_ranges(
+        date.fromisoformat(START_DATE), date.fromisoformat(END_DATE)
     ):
-        raise ValueError(
-            "CNE6 factor_exposure 内容合同失败："
-            f"groups={row['groups']} "
-            f"factor_count={row['min_factor_count']}~{row['max_factor_count']} "
-            f"row_count={row['min_row_count']}~{row['max_row_count']} "
-            f"bad_groups={row['bad_groups']} invalid_values={row['invalid_values']}"
+        stats = query_df(
+            f"""
+            SELECT
+                count() AS groups,
+                min(factor_count) AS min_factor_count,
+                max(factor_count) AS max_factor_count,
+                min(row_count) AS min_row_count,
+                max(row_count) AS max_row_count,
+                countIf(
+                    factor_count != {expected}
+                    OR row_count != {expected}
+                ) AS bad_groups,
+                sum(invalid_values) AS invalid_values
+            FROM (
+                SELECT
+                    asof_date,
+                    code,
+                    uniqExact(factor_name) AS factor_count,
+                    count() AS row_count,
+                    countIf(NOT isFinite(zscore)) AS invalid_values
+                FROM {SOURCE_DATABASE}.factor_exposure FINAL
+                WHERE univ_flag = 1
+                  AND asof_date BETWEEN '{chunk_start}' AND '{chunk_end}'
+                  AND factor_name IN ({factor_names})
+                GROUP BY asof_date, code
+            )
+            """
         )
+        if stats.height != 1:
+            raise ValueError(f"CNE6 factor_exposure 覆盖统计返回异常：{chunk_start}~{chunk_end}")
+        row = stats.row(0, named=True)
+        groups = int(row["groups"] or 0)
+        if groups == 0:
+            # 月度块可能整月无交易日（源库停更等），跳过而非判失败
+            continue
+        total_groups += groups
+        if (
+            int(row["min_factor_count"] or 0) != expected
+            or int(row["max_factor_count"] or 0) != expected
+            or int(row["min_row_count"] or 0) != expected
+            or int(row["max_row_count"] or 0) != expected
+            or int(row["bad_groups"] or 0) != 0
+            or int(row["invalid_values"] or 0) != 0
+        ):
+            raise ValueError(
+                f"CNE6 factor_exposure 内容合同失败（{chunk_start}~{chunk_end}）："
+                f"groups={row['groups']} "
+                f"factor_count={row['min_factor_count']}~{row['max_factor_count']} "
+                f"row_count={row['min_row_count']}~{row['max_row_count']} "
+                f"bad_groups={row['bad_groups']} invalid_values={row['invalid_values']}"
+            )
+    if total_groups == 0:
+        raise ValueError("CNE6 factor_exposure 内容合同失败：全区间无有效股票日")
 
 
 def _date_ranges(start: date, end: date, *, months: int = CHUNK_MONTHS) -> list[tuple[date, date]]:
@@ -132,17 +150,29 @@ def _date_ranges(start: date, end: date, *, months: int = CHUNK_MONTHS) -> list[
 
 
 def load_exposure_base() -> pl.DataFrame:
-    # 暴露结果约 7 百万行；按季度读取避免单个 GB 级 HTTP 响应中断。
-    # 各块仍使用同一 FINAL 语义，合并后再统一构建 S/L 面板。
+    """按 CHUNK_MONTHS 分块拉取暴露，各块落盘缓存后合并。
+
+    缓存目的是**可续跑**：全区间 150 块、单次耗时以小时计，而服务端内存受
+    他人并发影响会中途失败（实测连续三次）。命中缓存的块直接复用，重跑只补
+    未完成部分。缓存键含区间与风格集，口径变化不会误用旧块。
+    各块仍使用同一 FINAL 语义，合并后再统一构建 S/L 面板。
+    """
     pivot_cols = ",\n        ".join(
         f"sumIf(zscore, factor_name = '{f}') AS {f}" for f in STYLE_FACTORS_S
     )
     factor_names = ", ".join(f"'{factor}'" for factor in STYLE_FACTORS_S)
+    EXPOSURE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     frames = []
     for chunk_start, chunk_end in _date_ranges(
         date.fromisoformat(START_DATE),
         date.fromisoformat(END_DATE),
     ):
+        cache_file = EXPOSURE_CACHE_DIR / f"exposure_{chunk_start}_{chunk_end}.parquet"
+        if cache_file.exists():
+            frame = pl.read_parquet(cache_file)
+            print(f"      暴露分块 {chunk_start}~{chunk_end}: {frame.height:,} 行（缓存）")
+            frames.append(frame)
+            continue
         sql = f"""
             SELECT asof_date, code,
             {pivot_cols}
@@ -157,6 +187,10 @@ def load_exposure_base() -> pl.DataFrame:
             raise ValueError(
                 f"CNE6 factor_exposure 查询为空：{chunk_start}~{chunk_end}"
             )
+        # 先写临时文件再 rename，避免中断留下半截 parquet 被后续误当作有效缓存
+        tmp_file = cache_file.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        frame.write_parquet(tmp_file)
+        tmp_file.replace(cache_file)
         print(f"      暴露分块 {chunk_start}~{chunk_end}: {frame.height:,} 行")
         frames.append(frame)
     df = pl.concat(frames, how="vertical")
