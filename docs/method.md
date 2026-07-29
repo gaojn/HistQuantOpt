@@ -108,7 +108,7 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 
 **风险覆盖保护**：CNE6 原始暴露和特质方差均完整才记为覆盖。未覆盖股票并入
 `sell_only`，禁止新开仓、已有持仓只能减仓；指数增强按基准权重计算覆盖率，低于
-`min_risk_coverage`（默认 0.5）跳过该期优化并告警（不中断整段回测），避免缺失值填 0 造成假中性。
+`min_risk_coverage`（默认 0.90）跳过该期优化并告警（不中断整段回测），避免缺失值填 0 造成假中性。
 
 状态判定见 [`RealMarketAdapter._compute_status`](../hqopt/data/real_adapter.py)；停牌优先级
 高于 ST/次新，避免停牌持仓丢失冻结语义。次新阈值（上市不足 `new_listing_days`

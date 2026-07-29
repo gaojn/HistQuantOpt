@@ -179,7 +179,7 @@ def _build_risk_model(
     CNE6L 面板（hl=252，月度以上策略）。
     """
     risk_aversion = _optional_float(opt_cfg, "risk_aversion")
-    min_risk_coverage = float(opt_cfg.get("min_risk_coverage", 0.5))
+    min_risk_coverage = float(opt_cfg.get("min_risk_coverage", 0.90))
     if not 0.0 <= min_risk_coverage <= 1.0:
         raise ValueError("optimizer.min_risk_coverage 必须位于 [0, 1]")
 

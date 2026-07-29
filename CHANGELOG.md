@@ -23,17 +23,6 @@
 - **需重跑**：全部历史优化、回测与归因。若要保持旧口径，在配置里显式写
   `universe.new_listing_days: 60`。
 
-### ⚠️ 破坏性：`min_risk_coverage` 默认 0.90 → 0.5
-
-`hqopt/pipeline/batch_optimize.py`、`configs/index_enhance_default.yaml`
-
-指数增强的基准 CNE6 覆盖率门槛下调。此前覆盖率低于 90% 即跳过该期优化（账本继续
-执行旧目标），2020 年初等面板缺口期会被整段跳过；下调到 50% 后这些期恢复正常优化。
-
-- **影响**：仅 `index_enhance`。此前被跳过的调仓期现在会生成新目标，权重与净值变化；
-  `alpha_max` 不读此阈值，不受影响。
-- **需重跑**：全部指数增强历史回测与归因。旧口径写 `optimizer.min_risk_coverage: 0.90`。
-
 ### ⚠️ 破坏性：CNE6S 面板目录改名 `data/barra_cne6` → `data/barra_cne6_S`
 
 `hqopt/risk/cne6_risk.py`、`hqopt/risk/attribution_data.py`、`data_manifest.yaml`、
