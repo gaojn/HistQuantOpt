@@ -9,6 +9,15 @@
 
 ## 未发布（工作区，2026-07-29）
 
+### 修复：交付安全、wheel 数据路径与分档数据锁
+
+- CNE6 暴露查询缓存键新增数据源、处理合同和版本指纹，拒绝复用旧的日期同名缓存。
+- ClickHouse 默认使用 HTTPS 并校验证书；明文 HTTP 仅允许显式危险开关，不自动降级。
+- 包版本统一为 `2.1.0`；配置新增外部 `data.root`，wheel 不再依赖 site-packages
+  内存在项目数据。成交状态机文档同步为“信号日盘中执行旧目标、收盘覆盖剩余订单”。
+- 数据锁默认按 `data_bundle.<profile>.lock.json` 选择，默认档兼容旧锁文件；本地
+  `default`、`attribution`、`long_risk`、`attribution_long` 四档均完成真实数据校验。
+
 ### ⚠️ 破坏性：量化选股基准统一为全市场等权
 
 `alpha_max` 的回测和收益归因现在显式使用同一个 `equal_weight` 基准。此前回测读取

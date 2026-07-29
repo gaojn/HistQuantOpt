@@ -42,6 +42,7 @@ from hqopt.pipeline.batch.config import (
     _parse_style_bound,
     _validate_alpha_config,
     load_config,
+    normalize_config_paths,
 )
 from hqopt.pipeline.batch.execution_walk import _partition_execution_days
 from hqopt.pipeline.batch.periods import _run_periods
@@ -64,6 +65,7 @@ def _load_market_panel(
     panel: pl.DataFrame | None,
     start_date: date,
     end_date: date,
+    data_root: Path,
 ) -> pl.DataFrame:
     """加载行情面板；多取到当年年初，保证首期 ADV/VWAP 有历史窗口。"""
     if panel is not None:
@@ -85,6 +87,7 @@ def _load_market_panel(
             "industry_l1", "list_days",
             "is_hs300", "is_zz500", "is_zz1000", "is_st",
         ],
+        cache_dir=data_root / "data" / "cache",
     )
     logger.info(f"  交易日={panel['date'].n_unique()}  股票={panel['code'].n_unique()}")
     return panel
@@ -157,6 +160,7 @@ def _build_optimizer(
 def _build_risk_model(
     opt_cfg: dict[str, Any],
     rebal_dates: list[date],
+    data_root: Path,
 ) -> tuple[CNE6RiskModel, float | None, float]:
     """加载 CNE6 风险模型，返回 (模型, risk_aversion, min_risk_coverage)。
 
@@ -173,12 +177,16 @@ def _build_risk_model(
     if not 0.0 <= min_risk_coverage <= 1.0:
         raise ValueError("optimizer.min_risk_coverage 必须位于 [0, 1]")
 
-    cne6_data_dir = opt_cfg.get("cne6_data_dir") or None
+    cne6_data_dir = (
+        Path(opt_cfg["cne6_data_dir"])
+        if opt_cfg.get("cne6_data_dir")
+        else data_root / "data" / "barra_cne6_S"
+    )
     # 传入调仓日：只把这些日期 as-of 命中的暴露截面读进内存（完整面板整表
     # 常驻约需 2.7GB，按需加载约减半）。
     risk_model = CNE6RiskModel(data_dir=cne6_data_dir, query_dates=rebal_dates)
     cov0, cov1 = risk_model.coverage
-    tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6_S(默认/短周期S)"
+    tag = cne6_data_dir.name
     mode = f"λ={risk_aversion}" if risk_aversion is not None else "L2 偏离惩罚"
     logger.info(f"\n[3a] CNE6 风险模型[{tag}]  覆盖={cov0}~{cov1}  目标风险项={mode}")
     return risk_model, risk_aversion, min_risk_coverage
@@ -205,7 +213,14 @@ def _build_benchmark(
     benchmark = IndexBenchmarkWeights(
         index=run_cfg.index,
         panel=panel,
+        cache_dir=run_cfg.data_root / "data" / "cache",
         source=bm_source,
+        official_path=(
+            run_cfg.data_root
+            / "data"
+            / "index_weight"
+            / "official_weight.parquet"
+        ),
         max_snapshot_age_days=max_snapshot_age_days,
     )
     benchmark.precompute(run_cfg.start_date, run_cfg.end_date, panel=panel)
@@ -218,11 +233,20 @@ def _prepare_inputs(
     alpha_df: pd.DataFrame | None,
 ) -> _BatchInputs:
     """解析配置、加载数据、构造优化器与风险模型。"""
-    cfg = load_config(config) if isinstance(config, (str, Path)) else config
+    cfg = (
+        load_config(config)
+        if isinstance(config, (str, Path))
+        else normalize_config_paths(config)
+    )
     run_cfg = _parse_run_config(cfg)
     opt_cfg = run_cfg.optimizer_cfg
 
-    panel = _load_market_panel(panel, run_cfg.start_date, run_cfg.end_date)
+    panel = _load_market_panel(
+        panel,
+        run_cfg.start_date,
+        run_cfg.end_date,
+        run_cfg.data_root,
+    )
 
     alpha_df, synthetic_alpha = _load_alpha_matrix(
         run_cfg.alpha_cfg,
@@ -257,7 +281,9 @@ def _prepare_inputs(
         cost_sell=float(run_cfg.execution_cfg.get("cost_sell", 0.002)),
     )
     risk_model, risk_aversion, min_risk_coverage = _build_risk_model(
-        opt_cfg, rebal_dates
+        opt_cfg,
+        rebal_dates,
+        run_cfg.data_root,
     )
     benchmark = _build_benchmark(run_cfg, panel)
     optimizer, base_config = _build_optimizer(
@@ -269,6 +295,7 @@ def _prepare_inputs(
         index=run_cfg.index,
         universe_cfg=run_cfg.universe_cfg,
         output_path=run_cfg.output_path,
+        data_root=run_cfg.data_root,
         synthetic_alpha=synthetic_alpha,
         panel=panel,
         alpha_df=alpha_df,

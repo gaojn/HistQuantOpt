@@ -6,6 +6,9 @@
 strategy: alpha_max
 index: all                # 全市场选股
 
+data:
+  root: ".."               # 相对本 YAML；wheel 安装后仍使用外部项目数据目录
+
 backtest:
   start_date: "2020-01-01"
   end_date: "2026-05-31"

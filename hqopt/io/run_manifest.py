@@ -25,6 +25,7 @@ from hqopt.io.data_bundle import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_MANIFEST = PROJECT_ROOT / "data_manifest.yaml"
 DEFAULT_DATA_LOCK = PROJECT_ROOT / "data_bundle.lock.json"
+PROFILE_DATA_LOCK_TEMPLATE = "data_bundle.{profile}.lock.json"
 RUN_MANIFEST_VERSION = 1
 _HASH_CHUNK_SIZE = 1024 * 1024
 
@@ -76,14 +77,29 @@ class DataLockEvidence:
 def verify_data_bundle_lock(
     config: dict[str, Any],
     *,
-    project_root: Path = PROJECT_ROOT,
+    project_root: Path | None = None,
 ) -> DataLockEvidence:
     """按配置 profile 做结构、覆盖范围、大小和 SHA-256 的强制校验。"""
-    root = project_root.resolve()
     data_cfg = config.get("data", {})
+    base_root = (project_root or PROJECT_ROOT).resolve()
+    root = _resolve_path(data_cfg.get("root", base_root), base_root)
     profile = infer_data_profile(config)
-    manifest_path = _resolve_path(data_cfg.get("manifest", DEFAULT_DATA_MANIFEST), root)
-    lock_path = _resolve_path(data_cfg.get("lock", DEFAULT_DATA_LOCK), root)
+    manifest_path = _resolve_path(
+        data_cfg.get("manifest", root / "data_manifest.yaml"),
+        root,
+    )
+    if data_cfg.get("lock"):
+        lock_path = _resolve_path(data_cfg["lock"], root)
+    else:
+        profile_lock = root / PROFILE_DATA_LOCK_TEMPLATE.format(profile=profile)
+        legacy_lock = root / "data_bundle.lock.json"
+        lock_path = (
+            legacy_lock
+            if profile == "default"
+            and not profile_lock.is_file()
+            and legacy_lock.is_file()
+            else profile_lock
+        )
     if not lock_path.is_file():
         raise FileNotFoundError(f"缺少数据锁文件：{lock_path}")
 

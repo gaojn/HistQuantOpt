@@ -7,6 +7,9 @@
 strategy: index_enhance
 index: zz1000             # 基准指数：中证1000（可切 hs300 / zz500）
 
+data:
+  root: ".."               # 相对本 YAML；wheel 安装后仍使用外部项目数据目录
+
 backtest:
   start_date: "2020-01-01"
   end_date: "2026-05-31"

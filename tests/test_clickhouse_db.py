@@ -10,6 +10,9 @@ def _clean_clickhouse_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "CLICKHOUSE_HOST",
         "CLICKHOUSE_PORT",
+        "CLICKHOUSE_SCHEME",
+        "CLICKHOUSE_CA_FILE",
+        clickhouse_db.ALLOW_INSECURE_HTTP_ENV,
         "CLICKHOUSE_DB",
         "CLICKHOUSE_USER",
         clickhouse_db.PWD_ENV,
@@ -24,6 +27,7 @@ def test_cfg_accepts_unified_wind_password(monkeypatch: pytest.MonkeyPatch) -> N
     cfg = clickhouse_db._cfg()
 
     assert cfg["pwd"] == "unified-secret"
+    assert cfg["scheme"] == "https"
     assert cfg["db"] == "the_quant"
     assert cfg["user"] == "dw_player"
 
@@ -38,6 +42,29 @@ def test_cfg_legacy_password_keeps_precedence(monkeypatch: pytest.MonkeyPatch) -
 def test_cfg_missing_password_names_unified_variable() -> None:
     with pytest.raises(RuntimeError, match=clickhouse_db.PWD_ENV_UNIFIED):
         clickhouse_db._cfg()
+
+
+def test_cfg_rejects_insecure_http_without_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(clickhouse_db.PWD_ENV_UNIFIED, "secret")
+    monkeypatch.setenv("CLICKHOUSE_SCHEME", "http")
+
+    with pytest.raises(RuntimeError, match="拒绝通过明文 HTTP"):
+        clickhouse_db._cfg()
+
+
+def test_cfg_allows_insecure_http_only_with_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(clickhouse_db.PWD_ENV_UNIFIED, "secret")
+    monkeypatch.setenv("CLICKHOUSE_SCHEME", "http")
+    monkeypatch.setenv(clickhouse_db.ALLOW_INSECURE_HTTP_ENV, "true")
+
+    with pytest.warns(RuntimeWarning, match="明文 HTTP"):
+        cfg = clickhouse_db._cfg()
+
+    assert cfg["scheme"] == "http"
 
 
 def _make_parquet_bytes() -> bytes:
@@ -69,8 +96,10 @@ def test_query_df_retries_transient_incomplete_read(
     payload = _make_parquet_bytes()
     calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def fake_urlopen(req, timeout=None, context=None):  # noqa: ARG001
         calls["n"] += 1
+        assert req.full_url.startswith("https://")
+        assert context is not None
         if calls["n"] < 3:
             raise http.client.IncompleteRead(b"", 2)
         return _FakeResponse(payload)
@@ -90,7 +119,7 @@ def test_query_df_gives_up_after_max_attempts(
     monkeypatch.setattr(clickhouse_db.time, "sleep", lambda _s: None)
     calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def fake_urlopen(req, timeout=None, context=None):  # noqa: ARG001
         calls["n"] += 1
         raise http.client.IncompleteRead(b"", 2)
 
@@ -108,7 +137,7 @@ def test_query_df_does_not_retry_http_error(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv(clickhouse_db.PWD_ENV_UNIFIED, "secret")
     calls = {"n": 0}
 
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
+    def fake_urlopen(req, timeout=None, context=None):  # noqa: ARG001
         calls["n"] += 1
         raise urllib.error.HTTPError(
             "http://x", 400, "Bad Request", {}, _io.BytesIO(b"boom")

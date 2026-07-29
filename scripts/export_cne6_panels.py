@@ -28,6 +28,8 @@ data/cache/ashare_daily_<year>.parquet 的 industry_l1（中信一级）做 one-
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 import uuid
 from datetime import date, timedelta
@@ -58,7 +60,9 @@ EXCLUDED_INDUSTRIES = {"", "未知"}
 # 暴露分块粒度（自然月）。服务端 56 GiB 内存为共享资源，调大有超限风险，
 # 详见 _date_ranges 的说明。
 CHUNK_MONTHS = 1
-# 分块缓存目录：支持中断续跑。区间或风格集变化时请清空本目录。
+# 分块缓存合同版本：数据源表语义、过滤条件或聚合口径变化时必须递增。
+EXPOSURE_CACHE_CONTRACT_VERSION = 1
+# 分块缓存目录：支持中断续跑。缓存文件名带完整口径指纹，旧口径不会命中。
 EXPOSURE_CACHE_DIR = CACHE_DIR / "cne6_exposure_chunks"
 
 
@@ -150,12 +154,61 @@ def _date_ranges(start: date, end: date, *, months: int = CHUNK_MONTHS) -> list[
     return ranges
 
 
+def _exposure_cache_fingerprint() -> str:
+    """返回暴露查询口径的稳定短指纹。
+
+    日期单独进入文件名；这里绑定数据源、因子集合、过滤条件和聚合语义。
+    服务端表定义或数据修订需要重新取数时，递增
+    ``EXPOSURE_CACHE_CONTRACT_VERSION`` 即可整体失效旧缓存。
+    """
+    contract = {
+        "version": EXPOSURE_CACHE_CONTRACT_VERSION,
+        "database": SOURCE_DATABASE,
+        "table": "factor_exposure",
+        "final": True,
+        "universe_filter": "univ_flag = 1",
+        "value_column": "zscore",
+        "aggregation": "sumIf(zscore, factor_name = <factor>)",
+        "group_by": ["asof_date", "code"],
+        "style_factors": list(STYLE_FACTORS_S),
+    }
+    payload = json.dumps(
+        contract,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _exposure_cache_path(chunk_start: date, chunk_end: date) -> Path:
+    """构造绑定查询口径与日期区间的缓存路径。"""
+    fingerprint = _exposure_cache_fingerprint()
+    return EXPOSURE_CACHE_DIR / (
+        f"exposure_v{EXPOSURE_CACHE_CONTRACT_VERSION}_{fingerprint}_"
+        f"{chunk_start}_{chunk_end}.parquet"
+    )
+
+
+def _validate_exposure_chunk(frame: pl.DataFrame, path: Path) -> None:
+    """读取缓存后再次校验最低内容合同，损坏缓存不得静默进入最终面板。"""
+    required = {"asof_date", "code", *STYLE_FACTORS_S}
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise ValueError(f"CNE6 暴露缓存 {path} 缺少字段：{missing}")
+    if frame.is_empty():
+        raise ValueError(f"CNE6 暴露缓存为空：{path}")
+    if not np.isfinite(frame.select(STYLE_FACTORS_S).to_numpy()).all():
+        raise ValueError(f"CNE6 暴露缓存含 NaN/Inf：{path}")
+
+
 def load_exposure_base() -> pl.DataFrame:
     """按 CHUNK_MONTHS 分块拉取暴露，各块落盘缓存后合并。
 
-    缓存目的是**可续跑**：全区间 150 块、单次耗时以小时计，而服务端内存受
+    缓存目的是**可续跑**：全区间约 150 块、单次耗时以小时计，而服务端内存受
     他人并发影响会中途失败（实测连续三次）。命中缓存的块直接复用，重跑只补
-    未完成部分。缓存键含区间与风格集，口径变化不会误用旧块。
+    未完成部分。缓存键含区间、数据源、风格集、过滤条件和聚合合同版本，
+    口径变化不会误用旧块；旧版 ``exposure_<日期>_<日期>.parquet`` 不再命中。
     各块仍使用同一 FINAL 语义，合并后再统一构建 S/L 面板。
     """
     pivot_cols = ",\n        ".join(
@@ -168,9 +221,10 @@ def load_exposure_base() -> pl.DataFrame:
         date.fromisoformat(START_DATE),
         date.fromisoformat(END_DATE),
     ):
-        cache_file = EXPOSURE_CACHE_DIR / f"exposure_{chunk_start}_{chunk_end}.parquet"
+        cache_file = _exposure_cache_path(chunk_start, chunk_end)
         if cache_file.exists():
             frame = pl.read_parquet(cache_file)
+            _validate_exposure_chunk(frame, cache_file)
             print(f"      暴露分块 {chunk_start}~{chunk_end}: {frame.height:,} 行（缓存）")
             frames.append(frame)
             continue
@@ -188,6 +242,7 @@ def load_exposure_base() -> pl.DataFrame:
             raise ValueError(
                 f"CNE6 factor_exposure 查询为空：{chunk_start}~{chunk_end}"
             )
+        _validate_exposure_chunk(frame, cache_file)
         # 先写临时文件再 rename，避免中断留下半截 parquet 被后续误当作有效缓存
         tmp_file = cache_file.with_suffix(f".{uuid.uuid4().hex}.tmp")
         frame.write_parquet(tmp_file)

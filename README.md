@@ -15,12 +15,15 @@ pip install -e .          # 装依赖 + 注册 hqopt 命令
 数据准备完成后（见 [docs/操作指南.md § 1](docs/操作指南.md#1-环境与数据准备)）：
 
 ```bash
-python scripts/verify_data_bundle.py --profile default --lock data_bundle.lock.json
+python scripts/verify_data_bundle.py --profile default \
+  --lock data_bundle.default.lock.json
 hqopt run configs/alpha_max_default.yaml        # 量化选股（全市场等权基准）
 hqopt run configs/index_enhance_default.yaml    # 指数增强（中证1000）
 ```
 
 产物在 `output/<策略>_default/`：`report.html`（交互报告）、`weights.parquet`、`nav.parquet`。
+默认 YAML 的 `data.root: ".."` 相对配置文件定位项目数据根目录；因此 wheel 安装后也会
+读取外部 `data/`、`alphas/`、数据清单和分档锁，不依赖 site-packages 内包含数据。
 
 默认配置使用含未来信息的合成 Alpha，只用于流程验证；终端和产物目录会显示
 `SYNTHETIC ALPHA` 提醒，HTML 报告不加水印。生产研究换成真实 Alpha 时，除通过

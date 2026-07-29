@@ -79,6 +79,42 @@ def test_data_lock_preflight_passes_and_rejects_changed_input(tmp_path: Path) ->
         verify_data_bundle_lock(config, project_root=tmp_path)
 
 
+def test_data_lock_uses_profile_specific_default_path(tmp_path: Path) -> None:
+    manifest_path, generated_lock = _write_data_contract(tmp_path)
+    profile_lock = tmp_path / "data_bundle.default.lock.json"
+    generated_lock.replace(profile_lock)
+    config = {
+        "data": {
+            "root": str(tmp_path),
+            "profile": "default",
+            "manifest": str(manifest_path),
+        },
+        "optimizer": {},
+    }
+
+    evidence = verify_data_bundle_lock(config)
+
+    assert evidence.lock_path == str(profile_lock)
+
+
+def test_default_profile_falls_back_to_legacy_lock(tmp_path: Path) -> None:
+    manifest_path, generated_lock = _write_data_contract(tmp_path)
+    legacy_lock = tmp_path / "data_bundle.lock.json"
+    generated_lock.replace(legacy_lock)
+    config = {
+        "data": {
+            "root": str(tmp_path),
+            "profile": "default",
+            "manifest": str(manifest_path),
+        },
+        "optimizer": {},
+    }
+
+    evidence = verify_data_bundle_lock(config)
+
+    assert evidence.lock_path == str(legacy_lock)
+
+
 def test_run_manifest_binds_identity_inputs_and_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

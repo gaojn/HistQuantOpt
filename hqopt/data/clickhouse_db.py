@@ -1,16 +1,19 @@
 """ClickHouse ``the_quant`` 只读连接层。
 
-HTTP 接口 + ``FORMAT Parquet`` → polars，零额外依赖（标准库 urllib）。
+HTTPS 接口 + ``FORMAT Parquet`` → polars，零额外依赖（标准库 urllib）。
 连接参数走环境变量，**密码绝不入代码/git**：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
+| ``CLICKHOUSE_SCHEME`` | ``https`` | 传输协议；默认强制 TLS |
 | ``CLICKHOUSE_HOST`` | ``124.222.224.45`` | 主机 |
 | ``CLICKHOUSE_PORT`` | ``18123`` | HTTP 端口 |
 | ``CLICKHOUSE_DB``   | ``the_quant`` | 库名（SQL 里写 ``库名.表名`` 可跨库，无需切换） |
 | ``CLICKHOUSE_USER`` | ``dw_player`` | 只读账号 |
 | ``CLICKHOUSE_WIND_PASSWORD`` | —（**必填**） | 只读密码，仅环境变量；2026-07-10 起服务端凭证已合并，单一密码覆盖全部库（wind_db/the_quant/test_barra_cne6_gao/...） |
 | ``CLICKHOUSE_PASSWORD`` | — | 旧变量名，仍兼容（优先级高于上者） |
+| ``CLICKHOUSE_CA_FILE`` | 系统 CA | 可选，自签/内部 CA 的 PEM 文件 |
+| ``CLICKHOUSE_ALLOW_INSECURE_HTTP`` | ``false`` | 仅可信隧道应急；设为 true 才允许明文 HTTP |
 
 用法::
 
@@ -26,13 +29,16 @@ import io
 import os
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
+import warnings
 
 import polars as pl
 
 DEFAULTS = {
+    "scheme": "https",
     "host": "124.222.224.45",
     "port": "18123",
     "db": "the_quant",
@@ -40,9 +46,14 @@ DEFAULTS = {
 }
 PWD_ENV = "CLICKHOUSE_PASSWORD"          # 旧变量名，优先读取（向后兼容）
 PWD_ENV_UNIFIED = "CLICKHOUSE_WIND_PASSWORD"  # 合并后的单一凭证（覆盖全部库）
+ALLOW_INSECURE_HTTP_ENV = "CLICKHOUSE_ALLOW_INSECURE_HTTP"
 _TIMEOUT = 600  # 单次查询上限（秒）；按年拉行情足够
 
 _FORMAT_RE = re.compile(r"\bFORMAT\s+\w+\s*$", re.IGNORECASE)
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _cfg() -> dict:
@@ -54,12 +65,32 @@ def _cfg() -> dict:
             f"  export {PWD_ENV_UNIFIED}='...'\n"
             f"  其余可选: CLICKHOUSE_HOST/PORT/DB/USER（默认 the_quant/dw_player）"
         )
+    scheme = os.environ.get("CLICKHOUSE_SCHEME", DEFAULTS["scheme"]).strip().lower()
+    if scheme not in {"https", "http"}:
+        raise RuntimeError(
+            f"CLICKHOUSE_SCHEME 仅支持 https/http，当前为 {scheme!r}"
+        )
+    if scheme == "http":
+        if not _env_truthy(ALLOW_INSECURE_HTTP_ENV):
+            raise RuntimeError(
+                "拒绝通过明文 HTTP 发送 ClickHouse 凭证。"
+                "请配置支持 TLS 的 CLICKHOUSE_SCHEME=https 端点；"
+                f"仅可信隧道应急时才可显式设置 {ALLOW_INSECURE_HTTP_ENV}=true。"
+            )
+        warnings.warn(
+            "ClickHouse 正通过明文 HTTP 传输 Basic Auth 凭证；"
+            "仅应在可信本地隧道内临时使用。",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return {
+        "scheme": scheme,
         "host": os.environ.get("CLICKHOUSE_HOST", DEFAULTS["host"]),
         "port": os.environ.get("CLICKHOUSE_PORT", DEFAULTS["port"]),
         "db": os.environ.get("CLICKHOUSE_DB", DEFAULTS["db"]),
         "user": os.environ.get("CLICKHOUSE_USER", DEFAULTS["user"]),
         "pwd": pwd,
+        "ca_file": os.environ.get("CLICKHOUSE_CA_FILE") or None,
     }
 
 
@@ -99,14 +130,30 @@ def query_df(
     q = sql.strip().rstrip(";")
     if not _FORMAT_RE.search(q):
         q += "\nFORMAT Parquet"
-    url = f"http://{cfg['host']}:{cfg['port']}/?database={cfg['db']}"
+    url = (
+        f"{cfg['scheme']}://{cfg['host']}:{cfg['port']}/"
+        f"?database={cfg['db']}"
+    )
     token = base64.b64encode(f"{cfg['user']}:{cfg['pwd']}".encode()).decode()
+    ssl_context = (
+        ssl.create_default_context(cafile=cfg["ca_file"])
+        if cfg["scheme"] == "https"
+        else None
+    )
     raw = b""
     for attempt in range(1, max_attempts + 1):
         req = urllib.request.Request(url, data=q.encode("utf-8"), method="POST")
         req.add_header("Authorization", f"Basic {token}")
         try:
-            raw = urllib.request.urlopen(req, timeout=timeout).read()  # noqa: S310 (固定内网HTTP)
+            if ssl_context is None:
+                response = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
+            else:
+                response = urllib.request.urlopen(  # noqa: S310
+                    req,
+                    timeout=timeout,
+                    context=ssl_context,
+                )
+            raw = response.read()
             break
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")[:800]
@@ -141,4 +188,11 @@ def ping() -> str:
     return df.item(0, "v") if df.height else "?"
 
 
-__all__ = ["query_df", "ping", "PWD_ENV", "PWD_ENV_UNIFIED", "DEFAULTS"]
+__all__ = [
+    "ALLOW_INSECURE_HTTP_ENV",
+    "DEFAULTS",
+    "PWD_ENV",
+    "PWD_ENV_UNIFIED",
+    "ping",
+    "query_df",
+]

@@ -1,7 +1,12 @@
 """两个 default 配置可加载且字段完整。"""
+from pathlib import Path
+
 import pytest
 
-from hqopt.pipeline.batch.config import _synthetic_alpha_enabled
+from hqopt.pipeline.batch.config import (
+    _synthetic_alpha_enabled,
+    normalize_config_paths,
+)
 from hqopt.pipeline.batch_optimize import _parse_style_bound, load_config
 
 
@@ -12,6 +17,7 @@ def test_default_configs_load():
     ]:
         cfg = load_config(path)
         assert cfg["strategy"] == strat
+        assert Path(cfg["data"]["root"]) == Path.cwd().resolve()
         assert "execution" in cfg
         assert cfg["alpha"]["synthetic"] is True
         assert cfg["alpha"]["max_staleness_days"] == 15
@@ -74,3 +80,51 @@ def test_valid_alpha_metadata_returns_synthetic_flag():
         {"source": "file", "synthetic": True}
     ) is True
     assert _synthetic_alpha_enabled({"source": "synthetic"}) is True
+
+
+def test_config_paths_resolve_from_external_data_root(tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    config_path = config_dir / "run.yaml"
+    config_path.write_text(
+        """
+strategy: alpha_max
+data:
+  root: ../bundle
+optimizer:
+  cne6_data_dir: data/barra_cne6_L
+alpha:
+  source: file
+  synthetic: false
+  path: alphas/signal.parquet
+output:
+  weights: output/weights.parquet
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    cfg = load_config(config_path)
+    root = (tmp_path / "bundle").resolve()
+
+    assert Path(cfg["data"]["root"]) == root
+    assert Path(cfg["optimizer"]["cne6_data_dir"]) == (
+        root / "data" / "barra_cne6_L"
+    )
+    assert Path(cfg["alpha"]["path"]) == root / "alphas" / "signal.parquet"
+    assert Path(cfg["output"]["weights"]) == root / "output" / "weights.parquet"
+
+
+def test_normalize_config_paths_does_not_mutate_caller(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    raw = {
+        "data": {"root": "bundle"},
+        "optimizer": {},
+        "alpha": {"source": "synthetic"},
+        "output": {"weights": "output/weights.parquet"},
+    }
+
+    normalized = normalize_config_paths(raw)
+
+    assert raw["data"]["root"] == "bundle"
+    assert raw["output"]["weights"] == "output/weights.parquet"
+    assert normalized["data"]["root"] == str((tmp_path / "bundle").resolve())

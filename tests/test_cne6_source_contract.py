@@ -190,6 +190,63 @@ def test_exposure_source_validation_fails_closed(monkeypatch) -> None:
         exporter.validate_exposure_source()
 
 
+def test_exposure_cache_fingerprint_binds_query_contract(monkeypatch) -> None:
+    baseline = exporter._exposure_cache_fingerprint()
+
+    monkeypatch.setattr(exporter, "SOURCE_DATABASE", "another_cne6_database")
+    assert exporter._exposure_cache_fingerprint() != baseline
+
+    monkeypatch.setattr(exporter, "SOURCE_DATABASE", "test_barra_cne6_gao")
+    monkeypatch.setattr(
+        exporter,
+        "EXPOSURE_CACHE_CONTRACT_VERSION",
+        exporter.EXPOSURE_CACHE_CONTRACT_VERSION + 1,
+    )
+    assert exporter._exposure_cache_fingerprint() != baseline
+
+
+def test_exposure_cache_ignores_legacy_and_invalidates_on_contract_change(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    start = date(2024, 1, 1)
+    end = date(2024, 1, 31)
+    monkeypatch.setattr(exporter, "START_DATE", start.isoformat())
+    monkeypatch.setattr(exporter, "END_DATE", end.isoformat())
+    monkeypatch.setattr(exporter, "EXPOSURE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(exporter, "STYLE_FACTORS_S", ("Size",))
+
+    frame = pl.DataFrame(
+        {
+            "asof_date": [start],
+            "code": ["A"],
+            "Size": [0.5],
+        }
+    )
+    frame.write_parquet(tmp_path / f"exposure_{start}_{end}.parquet")
+    calls = {"count": 0}
+
+    def fake_query(_sql: str) -> pl.DataFrame:
+        calls["count"] += 1
+        return frame
+
+    monkeypatch.setattr(exporter, "query_df", fake_query)
+
+    first = exporter.load_exposure_base()
+    second = exporter.load_exposure_base()
+    assert calls["count"] == 1
+    assert first.equals(second)
+    assert exporter._exposure_cache_path(start, end).is_file()
+
+    monkeypatch.setattr(
+        exporter,
+        "EXPOSURE_CACHE_CONTRACT_VERSION",
+        exporter.EXPOSURE_CACHE_CONTRACT_VERSION + 1,
+    )
+    exporter.load_exposure_base()
+    assert calls["count"] == 2
+
+
 def test_covariance_rejects_incomplete_triangle(monkeypatch) -> None:
     monkeypatch.setattr(
         exporter,

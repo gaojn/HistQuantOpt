@@ -41,7 +41,7 @@ def _override_alpha_file(cfg: dict, alpha_file: str | None) -> None:
         if alpha_cfg.get("source") == "synthetic":
             alpha_cfg["synthetic"] = True
         alpha_cfg["source"] = "file"
-        alpha_cfg["path"] = alpha_file
+        alpha_cfg["path"] = str(Path(alpha_file).expanduser().resolve())
 
 
 def _start_run_manifest(
@@ -69,6 +69,7 @@ def _start_run_manifest(
         output_dir=Path(cfg["output"]["weights"]).parent,
         command=[str(value) for value in sys.argv],
         data_lock=evidence,
+        project_root=Path(cfg["data"]["root"]),
     )
 
 
@@ -110,7 +111,9 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     from hqopt.pipeline.batch_optimize import load_config, run_batch_optimize
     cfg = load_config(args.config)
     if args.output:
-        cfg["output"]["weights"] = args.output
+        cfg["output"]["weights"] = str(
+            Path(args.output).expanduser().resolve()
+        )
     _override_alpha_file(cfg, args.alpha_file)
     if args.risk_aversion is not None:
         cfg["optimizer"]["risk_aversion"] = args.risk_aversion
@@ -243,6 +246,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     cfg = load_config(args.config)
     _override_alpha_file(cfg, args.alpha_file)
+    data_root = Path(cfg["data"]["root"])
 
     strategy = cfg["strategy"]
     bench = (
@@ -267,6 +271,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             risk_free=float(ex.get("risk_free", 0.02)),
             initial_value=float(bt["initial_value"]),
             out_dir=Path(wpath).parent,
+            cache_dir=data_root / "data" / "cache",
+            index_close_path=data_root / "data" / "指数收盘价信息.csv",
         )
         _finish_run_manifest(recorder, cfg, include_backtest=True)
     except Exception as exc:

@@ -5,6 +5,7 @@
 /alphas/*
 !/alphas/README.md
 /data_bundle.lock.json
+/data_bundle.*.lock.json
 
 # Python
 __pycache__/

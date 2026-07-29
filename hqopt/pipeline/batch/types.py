@@ -48,6 +48,7 @@ class _RunConfig:
     alpha_cfg: dict[str, Any]
     execution_cfg: dict[str, Any]
     output_path: Path
+    data_root: Path
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class _BatchInputs:
     index: str
     universe_cfg: dict[str, Any]
     output_path: Path
+    data_root: Path
     synthetic_alpha: bool
     panel: pl.DataFrame
     alpha_df: pd.DataFrame

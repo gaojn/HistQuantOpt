@@ -8,6 +8,7 @@ alpha.source、max_staleness_days 等非法值一律抛错，不做默认兜底�
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 _INDEX_NAMES = {"hs300": "沪深300", "zz500": "中证500", "zz1000": "中证1000"}
 _STRATEGIES = {"index_enhance", "alpha_max"}
 _ALPHA_SOURCES = {"file", "synthetic"}
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 # Alpha 陈旧告警阈值下限（自然日），防止高频调仓时阈值过小而刷屏。
 _MIN_ALPHA_STALENESS_WARN_DAYS = 7
@@ -80,9 +82,75 @@ def _alpha_staleness_warn_days(rebalance_freq: int) -> int:
     return max(int(rebalance_freq * 2 * 1.5), _MIN_ALPHA_STALENESS_WARN_DAYS)
 
 
+def _resolve_project_path(value: str | Path, root: Path) -> Path:
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def normalize_config_paths(
+    config: dict[str, Any],
+    *,
+    config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """返回路径已归一化的配置副本。
+
+    ``data.root`` 是运行数据根目录；写在 YAML 中时相对 YAML 所在目录解析，
+    直接传入 dict 时相对当前工作目录解析。未配置时保留源码仓库根目录兼容行为。
+    项目数据、Alpha 与输出路径随后统一相对 ``data.root`` 解析，使 wheel 无需
+    依赖 site-packages 内存在 ``data/``。
+    """
+    if not isinstance(config, dict):
+        raise ValueError("配置文件顶层必须是对象")
+    normalized = deepcopy(config)
+    data_cfg = normalized.setdefault("data", {})
+    if not isinstance(data_cfg, dict):
+        raise ValueError("data 配置必须是对象")
+
+    config_base = (
+        Path(config_path).expanduser().resolve().parent
+        if config_path is not None
+        else Path.cwd().resolve()
+    )
+    root_value = data_cfg.get("root")
+    data_root = (
+        _resolve_project_path(root_value, config_base)
+        if root_value is not None
+        else _PROJECT_ROOT
+    )
+    data_cfg["root"] = str(data_root)
+
+    for key in ("manifest", "lock"):
+        if data_cfg.get(key):
+            data_cfg[key] = str(_resolve_project_path(data_cfg[key], data_root))
+
+    alpha_cfg = normalized.get("alpha", {})
+    if isinstance(alpha_cfg, dict) and alpha_cfg.get("path"):
+        alpha_cfg["path"] = str(
+            _resolve_project_path(alpha_cfg["path"], data_root)
+        )
+
+    optimizer_cfg = normalized.get("optimizer", {})
+    if isinstance(optimizer_cfg, dict) and optimizer_cfg.get("cne6_data_dir"):
+        optimizer_cfg["cne6_data_dir"] = str(
+            _resolve_project_path(
+                optimizer_cfg["cne6_data_dir"],
+                data_root,
+            )
+        )
+
+    output_cfg = normalized.get("output", {})
+    if isinstance(output_cfg, dict) and output_cfg.get("weights"):
+        output_cfg["weights"] = str(
+            _resolve_project_path(output_cfg["weights"], data_root)
+        )
+    return normalized
+
+
 def load_config(config_path: str | Path) -> dict[str, Any]:
-    with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    path = Path(config_path).expanduser().resolve()
+    with path.open(encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    return normalize_config_paths(config, config_path=path)
 
 
 def _build_alpha_policy(alpha_cfg: dict[str, Any], rebal_freq: int) -> _AlphaPolicy:
@@ -139,6 +207,7 @@ def _parse_run_config(cfg: dict[str, Any]) -> _RunConfig:
         alpha_cfg=cfg["alpha"],
         execution_cfg=cfg.get("execution", {}),
         output_path=Path(cfg["output"]["weights"]),
+        data_root=Path(cfg["data"]["root"]),
     )
 
     index_name = _INDEX_NAMES.get(index, index.upper())

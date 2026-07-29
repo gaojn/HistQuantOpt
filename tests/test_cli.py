@@ -41,7 +41,7 @@ def test_alpha_file_override_preserves_synthetic_declaration():
 
     assert cfg["alpha"] == {
         "source": "file",
-        "path": "real_alpha.parquet",
+        "path": str(Path("real_alpha.parquet").resolve()),
         "synthetic": True,
     }
 
@@ -51,7 +51,7 @@ def test_alpha_file_override_preserves_real_declaration():
 
     _override_alpha_file(cfg, "new.parquet")
 
-    assert cfg["alpha"]["path"] == "new.parquet"
+    assert cfg["alpha"]["path"] == str(Path("new.parquet").resolve())
     assert cfg["alpha"]["synthetic"] is False
 
 
@@ -62,7 +62,7 @@ def test_alpha_file_override_freezes_synthetic_source_as_watermark():
 
     assert cfg["alpha"] == {
         "source": "file",
-        "path": "exported_synthetic.parquet",
+        "path": str(Path("exported_synthetic.parquet").resolve()),
         "synthetic": True,
     }
 
