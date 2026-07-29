@@ -40,6 +40,68 @@ def _override_alpha_file(cfg: dict, alpha_file: str | None) -> None:
         cfg["alpha"]["synthetic"] = False
 
 
+def _start_run_manifest(
+    args: argparse.Namespace,
+    cfg: dict,
+    *,
+    mode: str,
+):
+    """强制校验数据锁，并冻结本次运行的代码/配置/输入身份。"""
+    from hqopt.io.run_manifest import (
+        RunManifestRecorder,
+        verify_data_bundle_lock,
+    )
+
+    evidence = verify_data_bundle_lock(cfg)
+    logger.info(
+        "数据锁校验通过：profile=%s  lock=%s",
+        evidence.profile,
+        evidence.lock_path,
+    )
+    return RunManifestRecorder.start(
+        mode=mode,
+        config=cfg,
+        config_path=args.config,
+        output_dir=Path(cfg["output"]["weights"]).parent,
+        command=[str(value) for value in sys.argv],
+        data_lock=evidence,
+    )
+
+
+def _finish_run_manifest(
+    recorder,
+    cfg: dict,
+    *,
+    include_backtest: bool,
+    error: Exception | None = None,
+) -> None:
+    from hqopt.io.run_manifest import (
+        expected_run_artifacts,
+        load_run_quality_checks,
+    )
+
+    weights = cfg["output"]["weights"]
+    if error is not None:
+        unique, _ = recorder.finalize(
+            status="failed",
+            artifacts=[],
+            error=f"{type(error).__name__}: {error}",
+        )
+        logger.error("失败运行清单已保存：%s", unique)
+        return
+
+    artifacts = expected_run_artifacts(
+        weights, include_backtest=include_backtest
+    )
+    quality_checks = load_run_quality_checks(weights)
+    unique, _ = recorder.finalize(
+        status="complete",
+        artifacts=artifacts,
+        quality_checks=quality_checks,
+    )
+    logger.info("运行清单已保存：%s", unique)
+
+
 def cmd_optimize(args: argparse.Namespace) -> None:
     from hqopt.pipeline.batch_optimize import load_config, run_batch_optimize
     cfg = load_config(args.config)
@@ -48,7 +110,15 @@ def cmd_optimize(args: argparse.Namespace) -> None:
     _override_alpha_file(cfg, args.alpha_file)
     if args.risk_aversion is not None:
         cfg["optimizer"]["risk_aversion"] = args.risk_aversion
-    run_batch_optimize(cfg)
+    recorder = _start_run_manifest(args, cfg, mode="optimize")
+    try:
+        run_batch_optimize(cfg)
+        _finish_run_manifest(recorder, cfg, include_backtest=False)
+    except Exception as exc:
+        _finish_run_manifest(
+            recorder, cfg, include_backtest=False, error=exc
+        )
+        raise
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
@@ -78,20 +148,29 @@ def cmd_run(args: argparse.Namespace) -> None:
         or (cfg["index"] if strategy == "index_enhance" else "csiall")
     )
 
-    # 1. 优化（权重落地到 cfg.output.weights）
-    run_batch_optimize(cfg)
-    wpath = cfg["output"]["weights"]
+    recorder = _start_run_manifest(args, cfg, mode="run")
 
-    # 2. 回测 + 报告（输出到权重同目录）
-    bt, ex = cfg["backtest"], cfg.get("execution", {})
-    run_backtest(
-        wpath, bt["start_date"], bt["end_date"], index=bench,
-        cost_buy=float(ex.get("cost_buy", 0.001)),
-        cost_sell=float(ex.get("cost_sell", 0.002)),
-        risk_free=float(ex.get("risk_free", 0.02)),
-        initial_value=float(bt["initial_value"]),
-        out_dir=Path(wpath).parent,
-    )
+    try:
+        # 1. 优化（权重落地到 cfg.output.weights）
+        run_batch_optimize(cfg)
+        wpath = cfg["output"]["weights"]
+
+        # 2. 回测 + 报告（输出到权重同目录）
+        bt, ex = cfg["backtest"], cfg.get("execution", {})
+        run_backtest(
+            wpath, bt["start_date"], bt["end_date"], index=bench,
+            cost_buy=float(ex.get("cost_buy", 0.001)),
+            cost_sell=float(ex.get("cost_sell", 0.002)),
+            risk_free=float(ex.get("risk_free", 0.02)),
+            initial_value=float(bt["initial_value"]),
+            out_dir=Path(wpath).parent,
+        )
+        _finish_run_manifest(recorder, cfg, include_backtest=True)
+    except Exception as exc:
+        _finish_run_manifest(
+            recorder, cfg, include_backtest=True, error=exc
+        )
+        raise
 
 
 def cmd_attribute(args: argparse.Namespace) -> None:

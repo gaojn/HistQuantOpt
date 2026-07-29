@@ -15,7 +15,7 @@ pip install -e .          # 装依赖 + 注册 hqopt 命令
 数据准备完成后（见 [docs/操作指南.md § 1](docs/操作指南.md#1-环境与数据准备)）：
 
 ```bash
-python scripts/verify_data_bundle.py --profile default
+python scripts/verify_data_bundle.py --profile default --lock data_bundle.lock.json
 hqopt run configs/alpha_max_default.yaml        # 量化选股（对标中证全指）
 hqopt run configs/index_enhance_default.yaml    # 指数增强（中证1000）
 ```
