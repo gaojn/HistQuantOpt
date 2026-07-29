@@ -1,8 +1,8 @@
 """阶段二：逐期优化。
 
 每个调仓日的流程是「推进成交账本 → 构建优化域 → 取 Alpha → 求解 → 落账」。
-任何一步失败都不中断整段回测：不发布新权重行，由 ``replay_signal_day`` 恢复
-旧目标在该日的正常成交尝试。
+任何一步失败都不中断整段回测：信号日先执行旧目标；若未发布新权重行，旧目标继续
+保留并在后续交易日尝试。
 
 本模块的依赖全部经 ``_BatchInputs`` 实例传入（优化器、风险模型、基准、账本均为
 已构造好的实例），因此不持有任何可被测试 monkeypatch 的模块级全局。
@@ -354,8 +354,8 @@ def _record_period_success(
 def _run_periods(inputs: _BatchInputs) -> _PeriodOutcome:
     """逐期优化：推进成交账本 → 构建优化域 → 取 Alpha → 求解 → 落账。
 
-    任何一期在求解前后失败都不中断整段回测：不发布新权重行，由
-    ``replay_signal_day`` 恢复旧目标在该日的正常成交尝试。
+    任何一期在求解前后失败都不中断整段回测：信号日已正常执行旧目标；不发布
+    新权重行时，旧目标继续保留并在后续交易日尝试。
     """
     logger.info("\n[4] 逐期优化...")
     t_total = time.time()
@@ -372,17 +372,14 @@ def _run_periods(inputs: _BatchInputs) -> _PeriodOutcome:
 
         ctx = _prepare_period(inputs, rebal_date, actual_holdings, has_prior_target)
         if ctx is None:
-            walker.replay_signal_day(signal_day)
             continue
 
         alpha = _resolve_period_alpha(inputs, ctx, rebal_date, outcome.stats)
         if alpha is None:
-            walker.replay_signal_day(signal_day)
             continue
 
         result = _solve_period(inputs, ctx, alpha, rebal_date, outcome.stats)
         if result is None:
-            walker.replay_signal_day(signal_day)
             continue
 
         elapsed = time.time() - t0
@@ -409,8 +406,6 @@ def _run_periods(inputs: _BatchInputs) -> _PeriodOutcome:
                     if not np.isfinite(value) or value > POST_SOLVE_ABS_TOL
                 }
             logger.info(f"  [{rebal_date}] ✗ 求解失败：{result.status}")
-            # 未发布新目标时恢复旧目标在当日的正常执行，与重放权重日期保持一致。
-            walker.replay_signal_day(signal_day)
             continue
 
         _record_period_success(

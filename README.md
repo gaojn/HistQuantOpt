@@ -16,14 +16,16 @@ pip install -e .          # 装依赖 + 注册 hqopt 命令
 
 ```bash
 python scripts/verify_data_bundle.py --profile default --lock data_bundle.lock.json
-hqopt run configs/alpha_max_default.yaml        # 量化选股（对标中证全指）
+hqopt run configs/alpha_max_default.yaml        # 量化选股（全市场等权基准）
 hqopt run configs/index_enhance_default.yaml    # 指数增强（中证1000）
 ```
 
 产物在 `output/<策略>_default/`：`report.html`（交互报告）、`weights.parquet`、`nav.parquet`。
 
-默认配置使用含未来信息的合成 Alpha，只用于流程验证；终端、产物目录和 HTML 报告会同时显示
-`SYNTHETIC ALPHA` 警告。生产研究请通过 `--alpha-file` 换成真实 Alpha。
+默认配置使用含未来信息的合成 Alpha，只用于流程验证；终端和产物目录会显示
+`SYNTHETIC ALPHA` 提醒，HTML 报告不加水印。生产研究换成真实 Alpha 时，除通过
+`--alpha-file` 覆盖路径外，还必须在 YAML 中显式设置 `alpha.source: file` 和
+`alpha.synthetic: false`；CLI 及 Python API 的预载 `alpha_df` 都不会绕过或改写这两项。
 
 ## 文档
 

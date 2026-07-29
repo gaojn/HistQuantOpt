@@ -8,8 +8,8 @@ from __future__ import annotations
 # 避免两处阈值不一致。偏保守（宁可多判封板 → 不可成交，贴近真实）。
 LIMIT_TOL = 1e-3
 
-# 合成 Alpha 产物必须携带的统一水印。默认配置使用由未来收益构造的
-# VWAP5 标定信号，即使 alpha.source=file 也必须显式标记并传播到报告。
+# 合成 Alpha 产物的终端/目录提醒。默认配置使用由未来收益构造的
+# VWAP5 标定信号，即使 alpha.source=file 也必须显式标记并保留审计字段。
 SYNTHETIC_ALPHA_WARNING_FILE = "SYNTHETIC_ALPHA_WARNING.txt"
 SYNTHETIC_ALPHA_WARNING_TEXT = (
     "本产物使用了含未来信息的合成 Alpha 信号生成。\n"

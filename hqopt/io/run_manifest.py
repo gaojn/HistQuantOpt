@@ -217,10 +217,11 @@ class RunManifestRecorder:
         *,
         mode: str,
         config: dict[str, Any],
-        config_path: str | Path,
+        config_path: str | Path | None,
         output_dir: str | Path,
         command: list[str],
-        data_lock: DataLockEvidence,
+        data_lock: DataLockEvidence | None,
+        input_files: Iterable[tuple[str, str | Path]] = (),
         project_root: Path = PROJECT_ROOT,
     ) -> RunManifestRecorder:
         root = project_root.resolve()
@@ -228,9 +229,14 @@ class RunManifestRecorder:
         out = Path(output_dir).expanduser().resolve()
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ") + "-" + uuid.uuid4().hex[:12]
         started = datetime.now(UTC).isoformat()
-        source_config = Path(config_path).expanduser().resolve()
+        source_config = (
+            Path(config_path).expanduser().resolve()
+            if config_path is not None
+            else None
+        )
         alpha_cfg = config.get("alpha", {})
         inputs: list[dict[str, Any]] = []
+        seen_inputs: set[Path] = set()
         if alpha_cfg.get("source") == "file":
             alpha_path = Path(alpha_cfg["path"]).expanduser().resolve()
             if not alpha_path.is_file():
@@ -238,6 +244,40 @@ class RunManifestRecorder:
             alpha_record = _file_record(alpha_path, root)
             alpha_record["role"] = "alpha"
             inputs.append(alpha_record)
+            seen_inputs.add(alpha_path)
+        for role, value in input_files:
+            input_path = Path(value).expanduser().resolve()
+            if not input_path.is_file():
+                raise FileNotFoundError(f"运行输入文件不存在：{input_path}")
+            if input_path in seen_inputs:
+                continue
+            input_record = _file_record(input_path, root)
+            input_record["role"] = str(role)
+            inputs.append(input_record)
+            seen_inputs.add(input_path)
+
+        config_record = {
+            "source_path": str(source_config) if source_config is not None else None,
+            "source_sha256": (
+                sha256_file(source_config) if source_config is not None else None
+            ),
+            "effective_sha256": _canonical_sha256(config),
+        }
+        if source_config is None:
+            config_record["effective"] = config
+        data_lock_record = (
+            asdict(data_lock)
+            if data_lock is not None
+            else {
+                "profile": None,
+                "manifest_path": None,
+                "manifest_sha256": None,
+                "lock_path": None,
+                "lock_sha256": None,
+                "verified": False,
+                "reason": "standalone_command_without_config_bound_data_lock",
+            }
+        )
 
         payload = {
             "manifest_version": RUN_MANIFEST_VERSION,
@@ -247,12 +287,8 @@ class RunManifestRecorder:
             "started_at_utc": started,
             "command": command,
             "repository": collect_repository_state(root),
-            "config": {
-                "source_path": str(source_config),
-                "source_sha256": sha256_file(source_config),
-                "effective_sha256": _canonical_sha256(config),
-            },
-            "data_lock": asdict(data_lock),
+            "config": config_record,
+            "data_lock": data_lock_record,
             "inputs": inputs,
             "runtime": _runtime_state(),
             "alpha": {
@@ -306,6 +342,71 @@ class RunManifestRecorder:
         _atomic_write_json(latest, payload)
         self.in_progress_path.unlink(missing_ok=True)
         return unique, latest
+
+
+def execution_bundle_inputs(
+    weights_path: str | Path,
+) -> list[tuple[str, Path]]:
+    """返回独立回测/归因应绑定的权重 bundle 输入文件。"""
+    from hqopt.backtest.execution import (
+        batch_execution_stats_path_for_weights,
+        sell_only_manifest_path_for_weights,
+        sell_only_path_for_weights,
+    )
+
+    weights = Path(weights_path).expanduser().resolve()
+    candidates = [
+        ("weights", weights),
+        ("sell_only", sell_only_path_for_weights(weights)),
+        ("batch_execution_stats", batch_execution_stats_path_for_weights(weights)),
+        ("execution_bundle_manifest", sell_only_manifest_path_for_weights(weights)),
+    ]
+    return [
+        (role, path)
+        for role, path in candidates
+        if role == "weights" or path.is_file()
+    ]
+
+
+def expected_standalone_artifacts(
+    output_dir: str | Path,
+    *,
+    mode: str,
+) -> list[Path]:
+    """返回独立 backtest/attribute 必需产物，并拒绝静默缺失。"""
+    out = Path(output_dir).expanduser().resolve()
+    if mode == "backtest":
+        relative_paths = [
+            "report.html",
+            "nav.parquet",
+            "turnover.parquet",
+            "actual_weights.parquet",
+            "execution_stats.json",
+            "report_data/timeseries.parquet",
+            "report_data/turnover.parquet",
+            "report_data/metrics.parquet",
+            "report_data/yearly.parquet",
+            "report_data/monthly_excess.parquet",
+        ]
+    elif mode == "attribute":
+        relative_paths = [
+            "attribution_report.html",
+            "attribution_summary.csv",
+            "attribution_daily.parquet",
+            "attribution_factor_daily.parquet",
+            "attribution_execution_stats.json",
+        ]
+    else:
+        raise ValueError(f"独立运行清单模式不支持：{mode!r}")
+
+    artifacts = [out / relative for relative in relative_paths]
+    missing = [path for path in artifacts if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "独立运行成功但缺少必需产物："
+            + ", ".join(str(path) for path in missing)
+        )
+    return artifacts
 
 
 def expected_run_artifacts(
@@ -365,7 +466,9 @@ __all__ = [
     "DataLockEvidence",
     "RunManifestRecorder",
     "collect_repository_state",
+    "execution_bundle_inputs",
     "expected_run_artifacts",
+    "expected_standalone_artifacts",
     "infer_data_profile",
     "load_run_quality_checks",
     "sha256_file",

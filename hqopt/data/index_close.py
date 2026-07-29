@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
-DEFAULT_PATH = Path("data/指数收盘价信息.csv")
+DEFAULT_PATH = Path(__file__).resolve().parents[2] / "data/指数收盘价信息.csv"
 
 # 指数 key（与项目其它处一致的英文 key / 别名）→ CSV 列名
 _INDEX_COL: dict[str, str] = {

@@ -38,12 +38,38 @@ def _optional_float(config: dict[str, Any], key: str) -> float | None:
     return None if value is None else float(value)
 
 
-def _synthetic_alpha_enabled(alpha_cfg: dict[str, Any]) -> bool:
-    """返回 Alpha 是否含前视；文件型 Alpha 也必须通过 synthetic 显式声明。"""
-    synthetic = alpha_cfg.get("synthetic", False)
+def _validate_alpha_config(alpha_cfg: dict[str, Any]) -> tuple[str, bool]:
+    """校验 Alpha 来源与可信度元数据，返回 ``(source, synthetic)``。"""
+    if not isinstance(alpha_cfg, dict):
+        raise ValueError("alpha 配置必须是对象")
+    if "source" not in alpha_cfg:
+        raise ValueError(
+            "配置缺少 alpha.source 字段。必须显式指定 'file' 或 'synthetic'"
+        )
+    source = alpha_cfg["source"]
+    if source not in _ALPHA_SOURCES:
+        raise ValueError(
+            f"alpha.source 须为 {sorted(_ALPHA_SOURCES)} 之一，当前为 {source!r}"
+        )
+    if source == "file" and "synthetic" not in alpha_cfg:
+        raise ValueError(
+            "alpha.source=file 时必须显式设置 alpha.synthetic 为 true/false；"
+            "框架不能从文件名或 --alpha-file 推断信号是否含前视"
+        )
+    synthetic = alpha_cfg.get("synthetic", source == "synthetic")
     if not isinstance(synthetic, bool):
         raise ValueError("alpha.synthetic 必须是布尔值 true/false")
-    return synthetic or alpha_cfg.get("source") == "synthetic"
+    if source == "synthetic" and not synthetic:
+        raise ValueError(
+            "alpha.source=synthetic 与 alpha.synthetic=false 矛盾；"
+            "合成 Alpha 必须标记为 synthetic=true"
+        )
+    return source, synthetic
+
+
+def _synthetic_alpha_enabled(alpha_cfg: dict[str, Any]) -> bool:
+    """返回 Alpha 是否含前视，并完整校验来源与可信度元数据。"""
+    return _validate_alpha_config(alpha_cfg)[1]
 
 
 def _alpha_staleness_warn_days(rebalance_freq: int) -> int:

@@ -202,22 +202,23 @@ hqopt/
 ### 6.1 `batch_optimize.py` 的拆分边界
 
 原为 1167 行单文件，扛了配置解析、输入准备、逐期优化、成交推进、汇总发布五段职责，
-2026-07-29 拆为 `batch/` 包，主文件 350 行。
+2026-07-29 拆为 `batch/` 包，主文件约 350 行。
 
-**阶段一为什么必须留在 `batch_optimize.py`**：测试中有 **46 处
-`monkeypatch.setattr(batch, ...)`**，打在该模块命名空间的 5 个符号上——
+**当前边界的设计依据是组合根，而不是测试 patch**：`batch_optimize.py` 负责把配置、
+行情、风险模型、基准、优化器和成交账本装配成 `_BatchInputs`，是 pipeline 的
+composition root；`batch/periods.py` 和 `batch/publish.py` 只消费已构造的依赖，
+分别负责逐期状态推进和原子发布。这样依赖方向保持为“入口装配 → 业务阶段”，子模块
+不反向读取入口模块的全局状态。
+
+现有测试确有 46 处 `monkeypatch.setattr(batch, ...)`，覆盖
 `CNE6RiskModel`、`AlphaMaxOptimizer`、`IndexEnhanceOptimizer`、
-`IndexBenchmarkWeights`、`ExecutionLedger`。Python 在调用时从**函数定义所在模块**的
-命名空间解析全局名字，因此构造这 5 个对象的代码一旦移入子模块，46 处 patch 会全部
-静默失效。危险之处在于失败模式是**假绿**：patch 变空转，测试却可能照常通过。
-新增代码若要在这里构造可被测试替换的对象，同样必须放在本模块。
-
-阶段二/三能安全外移，是因为它们的依赖**全部经 `_BatchInputs` 实例传入**（优化器、
-风险模型、基准、账本都是已构造好的实例），不引用任何模块级全局。
+`IndexBenchmarkWeights`、`ExecutionLedger`。这是当前导入路径的**兼容债务**，
+不是“阶段一永远不能外移”的架构理由。若未来把装配继续拆出，应先引入显式依赖注入，
+或把测试 patch 迁移到真正拥有构造点的模块，并增加断言证明替身确实被调用。
 
 | 模块 | 行数 | 内容 |
 |---|---:|---|
-| `batch_optimize.py` | 350 | 阶段一 + `run_batch_optimize` + 4 个兼容 re-export |
+| `batch_optimize.py` | 约 350 | composition root + `run_batch_optimize` + 4 个兼容 re-export |
 | `batch/types.py` | 116 | `_AlphaPolicy` `_RunConfig` `_BatchInputs` `_PeriodContext` `_RunStats` `_PeriodOutcome` |
 | `batch/config.py` | 127 | `load_config` `_parse_run_config` `_parse_style_bound` `_build_alpha_policy` 等 |
 | `batch/execution_walk.py` | 136 | 成交日 helpers + `_ExecutionWalker` |
@@ -229,12 +230,13 @@ hqopt/
 `_ExecutionWalker`、`_clean_target_weights`）本模块自身已不使用，在文件末尾以带
 `# noqa: F401` 的导入显式 re-export，删除会破坏调用方。
 
-**已否决的更彻底方案**：把阶段一也拆走、5 个依赖改为参数注入。主文件可再减约 200 行，
-但需同步改 46 处 patch 目标并逐一验证「改完仍真正生效」；失败模式是假绿，风险高于收益。
+**当前未继续拆分的原因**只是迁移范围控制：组合根仍然清晰，继续拆分不会直接改善业务
+正确性，却需要同步调整现有替身注入方式。它不是被永久否决的方案；当装配逻辑继续增长时，
+应以构造函数/工厂参数注入完成下一步，而不是继续依赖模块级 patch。
 
-**重构验证**：以合成场景跑通 `run_batch_optimize`，对权重矩阵、`batch_execution_stats.json`
-与只卖矩阵取合并 SHA-256，拆分前后逐位一致；另以变异测试（绕过模块级名字使 patch
-空转）确认 46 处 monkeypatch 在拆分后仍真实生效——不能只依赖「测试全绿」。
+**现有验证证据**：`tests/test_batch_execution_feedback.py` 覆盖逐期优化、失败恢复和成交反馈，
+`tests/test_execution_bundle_e2e.py` 覆盖 batch bundle 到回测/归因的重放契约。仓库当前没有
+“拆分前后产物合并 SHA-256 对比”或“绕过 patch 的变异测试”，因此不把这两项写成已完成事实。
 
 ---
 
@@ -297,6 +299,11 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
      发布中、缺失或错配的批量 bundle fail-closed；manifest v1 保持兼容。完全没有
      sidecar/manifest/marker 的外部权重仅告警运行，只要存在其中任一配套文件或标记，
      就必须满足相应 bundle 契约。
+   - 项目级 RunManifest 覆盖 `run/optimize/backtest/attribute` 四个 CLI。独立
+     `backtest/attribute` 没有来源 YAML 时，以规范化 CLI 参数作为有效配置身份，
+     并绑定权重、已有 batch bundle 配套文件和全部输出 SHA-256；失败同样发布
+     不可覆盖清单。因为没有配置绑定的数据锁，清单明确记录
+     `data_lock.verified=false`，不伪装为已验证。Python API 的纯内存调用不自动落盘。
 3. **风险覆盖保护**：未覆盖股票只卖不买；指数基准覆盖率低于阈值则跳过该期并告警，
    不生成新权重行，旧目标保持激活并在当日正常尝试，不中断整段回测。
 4. **流动性为软惩罚（非硬约束）**：通过 `turnover_penalty` + 个股冲击成本向量（基于 ADV）软性压制换手，未实现 ADV 参与率硬约束。
@@ -315,9 +322,10 @@ RealMarketAdapter.build_snapshot         CNE6RiskModel.at(date)
    约 3.7GB；按需加载在 155 期回测下降到约 1.5GB，单期查询由 ~4.8ms 降到 ~1.4ms。
    不传 `query_dates` 时退回整表加载（行为与优化前一致）。
 8. **收益归因是独立分析层，不反向影响优化**：归因复用成交账本，把目标权重重放为
-   逐日实际权重，再结合 ClickHouse `test_barra_cne6_gao` 对应 S/L 的
-   `factor_return_* / specific_return_*` 事后拆解
-   超额收益。方法与残差自检的已知局限见
+   逐日实际权重和真实组合日收益，再结合 ClickHouse `test_barra_cne6_gao` 对应 S/L
+   的 `factor_return_* / specific_return_*` 事后拆解超额收益。VWAP 时点差、费用和
+   滑点归入独立 `execution_effect`，归因累计与成交账本 NAV 严格闭合。方法与残差
+   自检的已知局限见
    [method.md §9](method.md#9-收益归因return-attribution)。
 9. **精确重放边界**：从调仓周期中途裁剪权重并以全现金启动，无法恢复此前股数和
    pending/filled 状态；当前接口不支持载入完整 checkpoint，精确重放必须从策略起点开始。

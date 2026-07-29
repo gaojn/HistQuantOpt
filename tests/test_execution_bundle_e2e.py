@@ -160,9 +160,18 @@ def _batch_config(tmp_path) -> dict:
 
 class _AttributionResult:
     def __init__(self) -> None:
-        self.summary = pd.DataFrame({"contribution": [0.0]}, index=["Country"])
+        self.summary = pd.DataFrame(
+            {
+                "累计贡献": [0.0, 0.0],
+                "年化贡献": [0.0, 0.0],
+                "占主动收益%": [np.nan, np.nan],
+                "t统计": [np.nan, np.nan],
+                "年化波动": [0.0, 0.0],
+            },
+            index=["Country", "合计(主动收益)"],
+        )
         self.daily = pd.DataFrame(
-            {"coverage_pct": [1.0]},
+            {"coverage_pct": [1.0], "relative_active_return": [0.0]},
             index=pd.to_datetime(["2024-01-03"]),
         )
         self.factor_daily = pd.DataFrame(
@@ -186,8 +195,9 @@ class _RecordingAttributor:
         benchmark_weight_df,
         adj_close,
         actual_weight_df=None,
+        realized_portfolio_return=None,
     ):
-        del weight_df, benchmark_weight_df, adj_close
+        del weight_df, benchmark_weight_df, adj_close, realized_portfolio_return
         type(self).actual_weights = actual_weight_df
         return _AttributionResult()
 
@@ -196,7 +206,7 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
     tmp_path,
     monkeypatch,
 ):
-    """失败候选继续旧目标；成功候选取消旧目标并从 T+1 执行新目标。"""
+    """信号日先执行旧目标；成功候选收盘覆盖，失败候选继续旧目标。"""
     panel = _market_panel()
     optimizer = _SequencedOptimizer()
     monkeypatch.setattr(batch, "CNE6RiskModel", _RiskModel)
@@ -212,8 +222,10 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
     successful_dates = pd.to_datetime(weight_df.index)
     assert successful_dates.tolist() == [_DATE_INDEX[0], _DATE_INDEX[2]]
     assert optimizer.calls == len(_TRADE_DATES)
-    assert optimizer.prev_weights[1].sum() == pytest.approx(0.0)
+    assert optimizer.prev_weights[1]["A"] == pytest.approx(0.5)
+    assert optimizer.prev_weights[1]["C"] == pytest.approx(0.0)
     assert optimizer.prev_weights[2]["A"] == pytest.approx(0.5)
+    assert optimizer.prev_weights[2]["C"] == pytest.approx(0.5)
 
     weight_path = tmp_path / "weights.parquet"
     stats_path = tmp_path / "batch_execution_stats.json"
@@ -258,7 +270,7 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
         weight_path,
         _TRADE_DATES[0],
         _TRADE_DATES[-1],
-        index="all",
+        index="equal_weight",
         cost_buy=0.0,
         cost_sell=0.0,
         risk_free=0.0,
@@ -269,12 +281,15 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
         weight_path,
         _TRADE_DATES[0],
         _TRADE_DATES[-1],
-        index="all",
+        index="equal_weight",
         out_dir=attribution_out,
         cost_buy=0.0,
         cost_sell=0.0,
         initial_value=1_000.0,
     )
+    attribution_report = attribution_out / "attribution_report.html"
+    assert attribution_report.exists()
+    assert "收益归因报告" in attribution_report.read_text(encoding="utf-8")
 
     batch_stats = json.loads(stats_path.read_text(encoding="utf-8"))
     assert batch_stats["optimization"] == {
@@ -306,14 +321,18 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
         )
 
     assert batch_stats["final_shares"] == {}
-    assert batch_stats["order_states"] == {"A": "filled", "D": "expired"}
+    assert batch_stats["order_states"] == {
+        "A": "filled",
+        "C": "filled",
+        "D": "expired",
+    }
     assert batch_stats["expired_order_count"] == 1
     assert batch_stats["expired_notional"] == pytest.approx(1_000.0)
 
     actual_weights = backtest_result.actual_weights.reindex(columns=_CODES, fill_value=0.0)
     assert actual_weights.loc[_DATE_INDEX[1], "A"] == pytest.approx(0.5)
     assert actual_weights.loc[_DATE_INDEX[1], "C"] == pytest.approx(0.0)
-    assert actual_weights.loc[_DATE_INDEX[2], "C"] == pytest.approx(0.0)
+    assert actual_weights.loc[_DATE_INDEX[2], "C"] == pytest.approx(0.5)
     assert actual_weights.loc[_DATE_INDEX[2], "D"] == pytest.approx(0.0)
     pd.testing.assert_frame_equal(
         _RecordingAttributor.actual_weights.reindex(columns=_CODES, fill_value=0.0),

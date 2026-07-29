@@ -396,3 +396,145 @@ def test_ie_active_weight_upper_conflict_feasible():
     )
     # 停牌无持仓票 w==0
     assert res.weights[0] < 1e-6, f"停牌无持仓票权重应为 0，实为 {res.weights[0]:.6f}"
+
+
+# ---- 波动率 / 跟踪误差硬上限（te_upper / vol_upper）----
+
+def _risk_snapshot(snap, *, seed: int = 11, scale: float = 1.0):
+    """构造与 tickers 对齐的 RiskSnapshot，F/delta 为日频方差。"""
+    from datetime import date
+
+    from hqopt.risk.cne6_risk import RiskSnapshot
+
+    n = len(snap.tickers)
+    k = len(CNE6)
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, k))
+    a = rng.standard_normal((k, k))
+    # 日频因子协方差：对角约 (1.3%)²，与真实 CNE6 量级一致
+    F = (a @ a.T) / k * (0.013 ** 2) * scale
+    delta = np.full(n, (0.02 ** 2) * scale)     # 日频特质方差
+    return RiskSnapshot(
+        as_of=date(2026, 6, 30),
+        tickers=list(snap.tickers),
+        factor_names=list(CNE6),
+        X=X,
+        F=F,
+        delta=delta,
+        covered_mask=np.ones(n, dtype=bool),
+    )
+
+
+def _annual_vol(exposure, rs):
+    daily = exposure @ rs.X @ rs.F @ rs.X.T @ exposure + float(
+        np.sum(rs.delta * exposure ** 2)
+    )
+    return float(np.sqrt(max(daily, 0.0) * 252))
+
+
+def test_te_upper_binds_and_disables_risk_penalty(snap):
+    """指增：TE 上限生效，且目标函数第二项被关闭后解贴近上限。"""
+    alpha = np.random.default_rng(3).standard_normal(len(snap.tickers))
+    w_bm = np.full(len(snap.tickers), 1.0 / len(snap.tickers))
+    rs = _risk_snapshot(snap)
+    cfg = IndexEnhanceConfig(
+        weight_upper=0.10,
+        min_constituent_ratio=0.0,
+        industry_active_bound=0.50,
+        style_active_bound=10.0,
+        max_turnover=None,
+        te_upper=0.05,
+    )
+    res = IndexEnhanceOptimizer(cfg).optimize(
+        alpha, snap, benchmark_weight=w_bm, risk_snapshot=rs
+    )
+    assert res.is_feasible
+    realized = _annual_vol(res.weights - w_bm, rs)
+    assert realized <= 0.05 + 1e-6
+    # 关闭风险惩罚后目标为线性，最优解应落在可行域边界（TE 贴近上限）
+    assert realized > 0.05 * 0.9
+
+
+def test_te_upper_tighter_bound_yields_lower_te(snap):
+    """收紧上限必须真的降低 TE，确认约束不是摆设。"""
+    alpha = np.random.default_rng(3).standard_normal(len(snap.tickers))
+    w_bm = np.full(len(snap.tickers), 1.0 / len(snap.tickers))
+    rs = _risk_snapshot(snap)
+    base = dict(
+        weight_upper=0.10, min_constituent_ratio=0.0,
+        industry_active_bound=0.50, style_active_bound=10.0, max_turnover=None,
+    )
+    loose = IndexEnhanceOptimizer(
+        IndexEnhanceConfig(**base, te_upper=0.08)
+    ).optimize(alpha, snap, benchmark_weight=w_bm, risk_snapshot=rs)
+    tight = IndexEnhanceOptimizer(
+        IndexEnhanceConfig(**base, te_upper=0.02)
+    ).optimize(alpha, snap, benchmark_weight=w_bm, risk_snapshot=rs)
+    assert loose.is_feasible and tight.is_feasible
+    assert _annual_vol(tight.weights - w_bm, rs) < _annual_vol(loose.weights - w_bm, rs)
+
+
+def test_vol_upper_binds_for_alpha_max(snap):
+    """选股：组合年化波动率上限生效。"""
+    alpha = np.random.default_rng(4).standard_normal(len(snap.tickers))
+    rs = _risk_snapshot(snap)
+    cfg = AlphaMaxConfig(
+        weight_upper=0.05, industry_upper=0.5, style_bound=None, vol_upper=0.15
+    )
+    res = AlphaMaxOptimizer(cfg).optimize(alpha, snap, risk_snapshot=rs)
+    assert res.is_feasible
+    assert _annual_vol(res.weights, rs) <= 0.15 + 1e-6
+
+
+def test_bound_conflicts_with_risk_aversion():
+    """上限与软惩罚是同一权衡的两种参数化，同时设置必须报错而非静默取一。"""
+    with pytest.raises(ValueError, match="不可同时设置"):
+        IndexEnhanceConfig(te_upper=0.05, risk_aversion=1.0)
+    with pytest.raises(ValueError, match="不可同时设置"):
+        AlphaMaxConfig(vol_upper=0.15, risk_aversion=1.0)
+
+
+def test_bound_must_be_positive():
+    with pytest.raises(ValueError, match="必须为正"):
+        IndexEnhanceConfig(te_upper=0.0)
+    with pytest.raises(ValueError, match="必须为正"):
+        AlphaMaxConfig(vol_upper=-0.1)
+
+
+def test_bound_requires_risk_snapshot(snap):
+    """无风险模型时必须明确报错，不得静默退回 L2 代理（语义不同）。"""
+    alpha = np.random.default_rng(6).standard_normal(len(snap.tickers))
+    w_bm = np.full(len(snap.tickers), 1.0 / len(snap.tickers))
+    with pytest.raises(ValueError, match="需要 optimize"):
+        IndexEnhanceOptimizer(
+            IndexEnhanceConfig(te_upper=0.05)
+        ).optimize(alpha, snap, benchmark_weight=w_bm)
+    with pytest.raises(ValueError, match="需要 optimize"):
+        AlphaMaxOptimizer(AlphaMaxConfig(vol_upper=0.15)).optimize(alpha, snap)
+
+
+def test_yaml_config_passes_through_risk_bounds():
+    """YAML → dataclass 的透传：漏掉字段会让用户配的上限被静默忽略。"""
+    from hqopt.pipeline.batch_optimize import _build_optimizer
+
+    _, ie_cfg = _build_optimizer(
+        "index_enhance",
+        {
+            "weight_upper": 0.05, "min_constituent_ratio": 0.8,
+            "industry_active_bound": 0.05, "style_active_bound": 0.3,
+            "tracking_penalty": 10.0, "te_upper": 0.05,
+        },
+        risk_aversion=None,
+    )
+    assert ie_cfg.te_upper == 0.05
+
+    _, am_cfg = _build_optimizer(
+        "alpha_max", {"weight_upper": 0.02, "vol_upper": 0.20}, risk_aversion=None
+    )
+    assert am_cfg.vol_upper == 0.20
+
+    # 未配置时保持 None，确保既有回测结果不受影响
+    _, plain = _build_optimizer(
+        "alpha_max", {"weight_upper": 0.02}, risk_aversion=None
+    )
+    assert plain.vol_upper is None

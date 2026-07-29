@@ -38,6 +38,7 @@ import pandas as pd
 from hqopt.data.generator import MarketSnapshot
 from hqopt.optimizer._common import (
     BasePortfolioResult,
+    annualized_variance_cap,
     build_trading_masks,
     common_constraint_violations,
     finalize_weights,
@@ -46,7 +47,9 @@ from hqopt.optimizer._common import (
     neutralize_alpha,
     post_solve_failure_reason,
     post_solve_failures,
+    realized_annual_vol,
     resolve_style_bounds,
+    risk_quadratic_form,
     solve_with_fallback,
     state_constraints,
     turnover_terms,
@@ -100,6 +103,17 @@ class AlphaMaxConfig:
         - 提供且 optimize() 传入 risk_snapshot 时：启用真因子风险模型
           λ·(w'XFX'w + δ'w²)，刻画因子相关性与个股特质风险差异
         与 turnover_penalty 正交：风险项控组合风险，成本项控换手。
+    vol_upper : float | None
+        **年化组合波动率硬上限**（小数，0.20 = 20%），None=不约束（默认）。
+
+        启用后目标函数的风险惩罚项自动关闭，退化为
+        ``max α'w − 换手惩罚  s.t.  σ(w) ≤ vol_upper``——
+        即由"软惩罚调 λ 试出波动率"改为"直接指定波动率"，两者是同一
+        有效前沿的两种参数化，因此**不可与 risk_aversion 同时设置**（会报错）。
+
+        要求 optimize() 传入 risk_snapshot，否则报错。
+
+        注意：仅支持上限。下限 ``σ ≥ x`` 是反凸约束，无法在凸优化框架内表达。
     """
     weight_upper: float = 0.02
     industry_upper: float = 0.20
@@ -109,6 +123,18 @@ class AlphaMaxConfig:
     max_turnover: float | None = None
     turnover_penalty: float = 0.0
     risk_aversion: float | None = None
+    vol_upper: float | None = None              # 年化组合波动率硬上限（0.20=20%）
+
+    def __post_init__(self) -> None:
+        if self.vol_upper is not None:
+            if self.vol_upper <= 0:
+                raise ValueError(f"vol_upper 必须为正，收到 {self.vol_upper}")
+            if self.risk_aversion is not None:
+                raise ValueError(
+                    "vol_upper 与 risk_aversion 不可同时设置："
+                    "前者以硬约束直接指定组合波动率，后者以软惩罚间接控制，"
+                    "二者是同一权衡的两种参数化。请只保留一个。"
+                )
 
 
 class AlphaMaxOptimizer:
@@ -192,7 +218,20 @@ class AlphaMaxOptimizer:
             cfg.min_constituent_ratio > 0
             and snapshot.is_constituent is not None
         ):
-            const_idx = np.where(snapshot.constituent_mask)[0]
+            const_mask = snapshot.constituent_mask
+            # 防退化：成分掩码全 True 时该约束是 sum(全部 w) >= R，在预算约束
+            # sum(w)==1 下恒成立——配置里写着下限、实际毫无作用。空转的风控比
+            # 没有风控更危险（使用者据此以为容量/流动性有保障），故直接报错而非
+            # 静默接受。曾真实发生：index='all' 把全部股票标为成分（见
+            # RealMarketAdapter.build_snapshot_from_panel）。
+            if const_mask.all():
+                raise ValueError(
+                    f"min_constituent_ratio={cfg.min_constituent_ratio} 但成分掩码"
+                    f"全为 True（{len(const_mask)} 只全是成分），该约束在预算约束下"
+                    "恒成立、不起任何作用。请检查 snapshot.is_constituent 的口径，"
+                    "或把 min_constituent_ratio 设为 0 显式表示不约束。"
+                )
+            const_idx = np.where(const_mask)[0]
             if len(const_idx) > 0:
                 constraints.append(
                     cp.sum(w[const_idx]) >= cfg.min_constituent_ratio
@@ -217,16 +256,30 @@ class AlphaMaxOptimizer:
         )
         constraints.extend(turnover_constraints)
 
+        # ---- 8. 组合波动率硬上限（年化）----
+        # 启用后关闭目标函数的风险惩罚项：波动率已被硬约束限定，
+        # 再加软惩罚等于对同一风险重复收费，会让解退到上限以内。
+        vol_constrained = cfg.vol_upper is not None
+        if vol_constrained:
+            if risk_snapshot is None:
+                raise ValueError(
+                    "启用 vol_upper 需要 optimize(risk_snapshot=...) 提供 CNE6 风险模型；"
+                    "若只想控制集中度，请改用 diversification_penalty 或 weight_upper。"
+                )
+            vol_var = risk_quadratic_form(
+                w, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
+            )
+            constraints.append(vol_var <= annualized_variance_cap(cfg.vol_upper))
+
         # ---- 目标：max w'α - 风险惩罚 - 成本惩罚 ----
         # 风险项：优先 CNE6 因子风险模型 λ·(w'XFX'w + δ'w²)，
         #         未提供时退回 L2 分散惩罚 γ·‖w‖²（向后兼容）
-        if cfg.risk_aversion is not None and risk_snapshot is not None:
-            X = risk_snapshot.X                       # (N, K)
-            F = risk_snapshot.F                       # (K, K)
-            delta = risk_snapshot.delta               # (N,)
-            factor_risk = cp.quad_form(X.T @ w, cp.psd_wrap(F))
-            specific_risk = cp.sum(cp.multiply(delta, cp.square(w)))
-            risk_penalty = cfg.risk_aversion * (factor_risk + specific_risk)
+        if vol_constrained:
+            risk_penalty = 0.0
+        elif cfg.risk_aversion is not None and risk_snapshot is not None:
+            risk_penalty = cfg.risk_aversion * risk_quadratic_form(
+                w, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
+            )
         elif cfg.risk_aversion == 0.0:
             # 显式设 risk_aversion=0：完全关闭风险惩罚（无论有无 risk_snapshot）
             risk_penalty = 0.0
@@ -237,10 +290,17 @@ class AlphaMaxOptimizer:
 
         prob = cp.Problem(objective, constraints)
         failure = solve_with_fallback(prob)
+        # 波动率上限与个股/行业/换手约束叠加时可能不可行，原因里点名本约束
+        vol_hint = (
+            f"（已启用 vol_upper={cfg.vol_upper:.2%} 硬约束，"
+            "与个股/行业/换手约束叠加可能不可行，可先放宽本项排查）"
+            if vol_constrained
+            else ""
+        )
         if failure is not None:
-            return AlphaMaxResult.infeasible(tickers, failure)
+            return AlphaMaxResult.infeasible(tickers, f"{failure}{vol_hint}")
         if prob.status not in ("optimal", "optimal_inaccurate"):
-            return AlphaMaxResult.infeasible(tickers, prob.status)
+            return AlphaMaxResult.infeasible(tickers, f"{prob.status}{vol_hint}")
 
         weights = finalize_weights(np.array(w.value, dtype=float), masks)
         violations = common_constraint_violations(
@@ -268,6 +328,14 @@ class AlphaMaxOptimizer:
             )
             violations["style_absolute"] = max_positive_violation(
                 np.abs(post_style.T @ weights) - post_bound
+            )
+        if vol_constrained:
+            # 硬约束一律做求解后校验，避免"声称 σ≤20% 实则更高"的组合流入生产
+            realized_vol = realized_annual_vol(
+                weights, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
+            )
+            violations["volatility_upper"] = max_positive_violation(
+                realized_vol - cfg.vol_upper
             )
         failures = post_solve_failures(violations)
         if failures:

@@ -7,11 +7,10 @@
 三段式：``_prepare_inputs``（本模块）→ ``_run_periods``（``batch.periods``）
 → ``_publish_outputs``（``batch.publish``）。
 
-**阶段一为什么留在本模块**：测试对 ``CNE6RiskModel`` / ``AlphaMaxOptimizer`` /
-``IndexEnhanceOptimizer`` / ``IndexBenchmarkWeights`` / ``ExecutionLedger`` 的
-monkeypatch 打在本模块命名空间上（46 处）。构造这些对象的代码若移入子模块，
-会在子模块命名空间解析这些名字，patch 全部静默失效——失败模式是测试变空转却
-依旧显示通过。拆分边界与取舍见 docs/design.md §6.1。
+**阶段一为什么当前留在本模块**：这里是 composition root，负责构造风险模型、
+优化器、基准和成交账本，再通过 ``_BatchInputs`` 把实例交给阶段二/三。现有测试
+仍有 46 处 patch 依赖本模块构造点，这是需要迁移的兼容债务，不是永久架构约束。
+拆分边界与后续依赖注入方向见 docs/design.md §6.1。
 
 文件末尾另有 4 个只为兼容而 re-export 的符号，见那里的说明。
 """
@@ -37,12 +36,11 @@ from hqopt.io.data_panel import load_panel
 from hqopt.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from hqopt.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
 from hqopt.pipeline.batch.config import (
-    _ALPHA_SOURCES,
     _build_alpha_policy,
     _optional_float,
     _parse_run_config,
     _parse_style_bound,
-    _synthetic_alpha_enabled,
+    _validate_alpha_config,
     load_config,
 )
 from hqopt.pipeline.batch.execution_walk import _partition_execution_days
@@ -58,7 +56,7 @@ __all__ = ["load_config", "run_batch_optimize"]
 
 
 # ──────────────────────────────────────────────────────────────────
-# 阶段一：准备输入（含全部可 monkeypatch 的构造点，勿外移）
+# 阶段一：准备输入与依赖装配（pipeline composition root）
 # ──────────────────────────────────────────────────────────────────
 
 
@@ -96,28 +94,17 @@ def _load_alpha_matrix(
     alpha_cfg: dict[str, Any],
     alpha_df: pd.DataFrame | None,
     panel: pl.DataFrame,
-) -> pd.DataFrame:
-    """按 alpha.source 加载外部因子或生成合成因子。"""
+) -> tuple[pd.DataFrame, bool]:
+    """校验 Alpha 元数据后加载/接收矩阵，并返回 synthetic 标记。"""
+    alpha_source, synthetic_alpha = _validate_alpha_config(alpha_cfg)
     if alpha_df is not None:
         logger.info("\n[2] 使用预加载 Alpha 矩阵")
-        return alpha_df
+        return alpha_df, synthetic_alpha
 
-    if "source" not in alpha_cfg:
-        raise ValueError(
-            "配置缺少 alpha.source 字段。必须显式指定 'file'（外部真实/DLF alpha）"
-            "或 'synthetic'（含未来信息的标定用合成因子，仅供流程验证，"
-            "回测业绩不可信）——不接受默认兜底，防止漏配时误用前视信号。"
-        )
-    alpha_source = alpha_cfg["source"]
-    if alpha_source not in _ALPHA_SOURCES:
-        raise ValueError(
-            f"alpha.source 须为 {sorted(_ALPHA_SOURCES)} 之一，"
-            f"当前为 {alpha_source!r}"
-        )
     if alpha_source == "file":
         logger.info(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
-        return load_alpha_panel(alpha_cfg["path"])
-    return build_synthetic_alpha(
+        return load_alpha_panel(alpha_cfg["path"]), synthetic_alpha
+    generated_alpha = build_synthetic_alpha(
         panel,
         fwd_days=int(alpha_cfg["fwd_days"]),
         ic_mean=float(alpha_cfg["ic_mean"]),
@@ -125,6 +112,7 @@ def _load_alpha_matrix(
         decay=float(alpha_cfg["decay"]),
         seed=int(alpha_cfg["seed"]),
     )
+    return generated_alpha, synthetic_alpha
 
 
 def _build_optimizer(
@@ -145,6 +133,7 @@ def _build_optimizer(
             active_weight_upper=_optional_float(opt_cfg, "active_weight_upper"),
             weight_diff_l2_bound=_optional_float(opt_cfg, "weight_diff_l2_bound"),
             risk_aversion=risk_aversion,
+            te_upper=_optional_float(opt_cfg, "te_upper"),
         )
         return IndexEnhanceOptimizer(base_config), base_config
 
@@ -160,6 +149,7 @@ def _build_optimizer(
         max_turnover=_optional_float(opt_cfg, "max_turnover"),
         turnover_penalty=float(opt_cfg.get("turnover_penalty", 0.0)),
         risk_aversion=risk_aversion,
+        vol_upper=_optional_float(opt_cfg, "vol_upper"),
     )
     return AlphaMaxOptimizer(base_config), base_config
 
@@ -234,8 +224,11 @@ def _prepare_inputs(
 
     panel = _load_market_panel(panel, run_cfg.start_date, run_cfg.end_date)
 
-    synthetic_alpha = _synthetic_alpha_enabled(run_cfg.alpha_cfg)
-    alpha_df = _load_alpha_matrix(run_cfg.alpha_cfg, alpha_df, panel)
+    alpha_df, synthetic_alpha = _load_alpha_matrix(
+        run_cfg.alpha_cfg,
+        alpha_df,
+        panel,
+    )
     if synthetic_alpha:
         logger.warning(
             "\n%s\n  ⚠️  合成 Alpha 警告\n  %s%s",
@@ -321,7 +314,8 @@ def run_batch_optimize(
         多次调用（如扫描多个 Alpha）时传入同一面板可避免重复加载。
     alpha_df : pd.DataFrame | None
         预加载 Alpha 矩阵（index=date, columns=ticker）；为 None 时按
-        配置 alpha.source 加载/生成（默认行为）。
+        配置 alpha.source 加载/生成（默认行为）。即使预加载，也必须在配置中
+        提供合法的 alpha.source 和布尔型 alpha.synthetic。
 
     Returns
     -------
@@ -339,9 +333,9 @@ def run_batch_optimize(
 # ``batch_optimize.<name>`` 访问（``import hqopt.pipeline.batch_optimize as batch``）。
 # 保留导入以维持对外契约；F401 为此显式豁免，删除会破坏调用方。
 #
-# 注意：真正**不能**外移的是构造 CNE6RiskModel / AlphaMaxOptimizer /
-# IndexEnhanceOptimizer / IndexBenchmarkWeights / ExecutionLedger 的代码，
-# 它们被 monkeypatch 打在本模块命名空间上——那些留在了上方阶段一，不在此列。
+# 当前 CNE6RiskModel / AlphaMaxOptimizer / IndexEnhanceOptimizer /
+# IndexBenchmarkWeights / ExecutionLedger 的构造点仍留在上方 composition root。
+# 若未来外移，应同步改为显式依赖注入并迁移测试 patch；并非技术上不能外移。
 from hqopt.constants import SYNTHETIC_ALPHA_WARNING_FILE  # noqa: F401,E402
 from hqopt.pipeline.batch.execution_walk import _ExecutionWalker  # noqa: F401,E402
 from hqopt.pipeline.batch.periods import (  # noqa: E402

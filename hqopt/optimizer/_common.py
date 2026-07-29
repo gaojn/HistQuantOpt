@@ -30,6 +30,55 @@ _OPTIMAL_STATUSES = ("optimal", "optimal_inaccurate")
 # 求解后硬约束绝对容差。1e-5 权重对应 0.001 个百分点；超过即拒绝发布。
 POST_SOLVE_ABS_TOL = 1e-5
 
+# CNE6 的 F/delta 均为**日频**方差（实测 Country 因子对角元 1.8e-4，
+# 隐含日波动 1.34%、年化约 21%，符合 A 股）。对外配置一律用年化，
+# 内部按 252 个交易日换算：年化方差 = 日方差 × 252。
+TRADING_DAYS = 252
+
+
+def risk_quadratic_form(
+    exposure: Any,
+    factor_exposure: np.ndarray,
+    factor_cov: np.ndarray,
+    specific_var: np.ndarray,
+) -> Any:
+    """组合风险的 cvxpy 二次型：``e'XFX'e + δ'e²``（**日频方差**）。
+
+    Args:
+        exposure: 权重表达式；总风险传 ``w``，跟踪误差传 ``w - w_bm``。
+        factor_exposure: X，(N, K) 因子暴露。
+        factor_cov: F，(K, K) 因子协方差，需 PSD。
+        specific_var: δ，(N,) 特质方差。
+
+    Returns:
+        cvxpy 标量表达式，凸（PSD 二次型之和）。
+    """
+    factor_part = cp.quad_form(factor_exposure.T @ exposure, cp.psd_wrap(factor_cov))
+    specific_part = cp.sum(cp.multiply(specific_var, cp.square(exposure)))
+    return factor_part + specific_part
+
+
+def annualized_variance_cap(annual_vol_bound: float) -> float:
+    """年化波动率上限 → 日频方差上限，供二次型约束右端使用。"""
+    if annual_vol_bound <= 0:
+        raise ValueError(f"波动率/TE 上限必须为正，收到 {annual_vol_bound}")
+    return (annual_vol_bound ** 2) / TRADING_DAYS
+
+
+def realized_annual_vol(
+    exposure: np.ndarray,
+    factor_exposure: np.ndarray,
+    factor_cov: np.ndarray,
+    specific_var: np.ndarray,
+) -> float:
+    """求解后按同一口径回算年化波动率/TE，用于核验约束是否真的生效。"""
+    factor_exp = factor_exposure.T @ exposure
+    daily_var = float(
+        factor_exp @ factor_cov @ factor_exp
+        + np.sum(specific_var * np.square(exposure))
+    )
+    return float(np.sqrt(max(daily_var, 0.0) * TRADING_DAYS))
+
 
 def resolve_style_bounds(
     bound: float | dict[str, float],

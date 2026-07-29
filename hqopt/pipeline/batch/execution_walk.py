@@ -1,8 +1,8 @@
 """成交账本的按日推进游标。
 
-优化阶段与回测阶段必须走完全一致的执行语义，因此推进顺序（调仓日只估值、未发布
-新目标的调仓日恢复旧目标成交、区间末尾补记）固定在 ``_ExecutionWalker`` 一处，
-不散落到调用方。
+优化阶段与回测阶段必须走完全一致的执行语义，因此推进顺序（信号日先执行旧目标、
+收盘后由新目标覆盖、区间末尾补记）固定在 ``_ExecutionWalker`` 一处，不散落到
+调用方。
 """
 
 from __future__ import annotations
@@ -43,11 +43,6 @@ def _execution_day_frame(day: pl.DataFrame) -> pd.DataFrame:
     return day.drop("date").to_pandas().set_index("code")
 
 
-def _mark_execution_day(ledger: ExecutionLedger, day: pl.DataFrame) -> None:
-    """仅更新收盘估值，不执行当前 pending 目标。"""
-    ledger.mark_to_market(_execution_day_frame(day)["adj_close"])
-
-
 def _advance_execution_day(ledger: ExecutionLedger, day: pl.DataFrame) -> None:
     """把一个 polars 日截面送入共享成交账本。"""
     pdf = _execution_day_frame(day)
@@ -74,8 +69,8 @@ def _signal_day_suspended_tickers(day: pl.DataFrame) -> list[str]:
 class _ExecutionWalker:
     """按交易日推进共享成交账本，把游标状态收敛在一处。
 
-    优化阶段与回测阶段必须走完全一致的执行语义，因此推进顺序（调仓日只估值、
-    未发布新目标的调仓日恢复旧目标成交、区间末尾补记）都固定在这里。
+    优化阶段与回测阶段必须走完全一致的执行语义，因此推进顺序（信号日先执行
+    旧目标、收盘后由新目标覆盖、区间末尾补记）都固定在这里。
     """
 
     def __init__(
@@ -96,11 +91,7 @@ class _ExecutionWalker:
         return day
 
     def open_signal_day(self, rebal_date: date) -> pl.DataFrame:
-        """推进到调仓日：补齐此前交易日的成交，信号日仅更新估值。
-
-        候选调仓日先暂停旧目标——成功的新目标会直接替换，失败则由
-        ``replay_signal_day`` 恢复旧目标的当日尝试。
-        """
+        """推进到调仓日并执行旧目标；新目标在当日收盘后才可覆盖。"""
         while (
             self._cursor < len(self._trade_dates)
             and self._trade_dates[self._cursor] < rebal_date
@@ -119,13 +110,9 @@ class _ExecutionWalker:
         signal_day = self._days.get(rebal_date)
         if signal_day is None:
             raise RuntimeError(f"{rebal_date} 缺少信号日行情截面")
-        _mark_execution_day(self._ledger, signal_day)
+        _advance_execution_day(self._ledger, signal_day)
         self._cursor += 1
         return signal_day
-
-    def replay_signal_day(self, signal_day: pl.DataFrame) -> None:
-        """该调仓日未发布新目标：恢复旧目标在当日的正常成交尝试。"""
-        _advance_execution_day(self._ledger, signal_day)
 
     def finish(self) -> None:
         """推进到区间末日，补记最后一批 T+1/T+2/T+3 成交或过期。"""

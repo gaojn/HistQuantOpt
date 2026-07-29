@@ -27,6 +27,7 @@ data/cache/ashare_daily_<year>.parquet 的 industry_l1（中信一级）做 one-
 
 from __future__ import annotations
 
+import argparse
 import sys
 import uuid
 from datetime import date, timedelta
@@ -306,9 +307,39 @@ def _atomic_write_parquet(frame: pl.DataFrame, output: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="导出 CNE6 S/L 风险面板；支持分年拉取以规避服务端内存波动。"
+    )
+    parser.add_argument("--start", default=START_DATE, help=f"起始日期，默认 {START_DATE}")
+    parser.add_argument("--end", default=END_DATE, help=f"截止日期，默认 {END_DATE}")
+    parser.add_argument(
+        "--cache-only",
+        action="store_true",
+        help="只拉取暴露分块进本地缓存，不构建/写出面板。用于分年预热缓存。",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    global START_DATE, END_DATE
+    args = _parse_args(argv)
+    START_DATE, END_DATE = args.start, args.end
+    print(f"[区间] {START_DATE} ~ {END_DATE}" + ("（仅预热缓存）" if args.cache_only else ""))
+
     print("[0/3] 校验新库 factor_exposure 的 20 风格内容合同 ...")
     validate_exposure_source()
+    if args.cache_only:
+        print(
+            "[1/3] 拉取因子暴露进缓存 "
+            f"({SOURCE_DATABASE}, zscore, univ_flag==1) ..."
+        )
+        exposure = load_exposure_base()
+        print(
+            f"      缓存完成 {exposure.height:,} 行  "
+            f"日期 {exposure['rebal_date'].min()}~{exposure['rebal_date'].max()}"
+        )
+        return
     print(
         "[1/3] 拉取因子暴露 "
         f"({SOURCE_DATABASE}, zscore, univ_flag==1, ClickHouse SQL 端 pivot) ..."

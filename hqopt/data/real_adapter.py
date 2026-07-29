@@ -120,8 +120,16 @@ class RealMarketAdapter:
         # ---- 成分股标记 ----
         col_map = {"zz500": "is_zz500", "hs300": "is_hs300", "zz1000": "is_zz1000"}
         if index in ("all", "winda", "csiall", "market"):
-            # 全市场选股（量化选股 alpha_max）：universe 内全部视为"成分"
-            is_constituent = pd.Series(True, index=tickers, name="is_constituent")
+            # 全市场选股（alpha_max）：「成分」= 主流宽基（HS300∪ZZ500∪ZZ1000）。
+            # 此前把 universe 内全部股票标为 True，使 min_constituent_ratio 的约束
+            # 退化成 sum(全部 w) >= R，在预算约束 sum(w)==1 下恒成立——一个被配置
+            # 注释和文档背书、实际完全空转的流动性/容量下限。空转的风控比没有风控
+            # 更危险：使用者以为组合有 R 的权重落在主流宽基内，实则毫无约束。
+            is_constituent = (
+                today["is_hs300"].astype(bool)
+                | today["is_zz500"].astype(bool)
+                | today["is_zz1000"].astype(bool)
+            ).rename("is_constituent")
         elif index in col_map:
             is_constituent = today[col_map[index]].astype(bool).rename("is_constituent")
         else:

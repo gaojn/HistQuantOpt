@@ -41,6 +41,7 @@ import pandas as pd
 from hqopt.data.generator import MarketSnapshot
 from hqopt.optimizer._common import (
     BasePortfolioResult,
+    annualized_variance_cap,
     build_trading_masks,
     common_constraint_violations,
     finalize_weights,
@@ -49,7 +50,9 @@ from hqopt.optimizer._common import (
     neutralize_alpha,
     post_solve_failure_reason,
     post_solve_failures,
+    realized_annual_vol,
     resolve_style_bounds,
+    risk_quadratic_form,
     solve_with_fallback,
     state_constraints,
     turnover_terms,
@@ -102,6 +105,20 @@ class IndexEnhanceConfig:
     active_weight_upper : float | None
         单票主动偏离硬上限 |w_i - w_bm_i| ≤ δ，None=不约束（默认）。
         典型值：0.01（±1%）～ 0.03（±3%）。
+    te_upper : float | None
+        **年化跟踪误差硬上限**（小数，0.05 = 5%），None=不约束（默认）。
+
+        启用后目标函数的风险惩罚项自动关闭，退化为
+        ``max α'w − 换手惩罚  s.t.  TE(w) ≤ te_upper``——
+        即由"软惩罚调 λ 试出 TE"改为"直接指定 TE"，两者是同一有效前沿
+        的两种参数化，因此**不可与 risk_aversion 同时设置**（会报错）。
+
+        要求 optimize() 传入 risk_snapshot（需要真实因子协方差），
+        否则报错；不会退回 L2 代理（那是 weight_diff_l2_bound，语义不同）。
+
+        注意：仅支持上限。下限 ``TE ≥ x`` 是反凸约束，无法在凸优化框架内
+        表达；且关闭惩罚项后目标为线性，最优解通常落在可行域边界上，
+        TE 会自然贴近上限。
     """
     weight_upper: float = 0.05
     min_constituent_ratio: float = 0.80
@@ -113,6 +130,18 @@ class IndexEnhanceConfig:
     weight_diff_l2_bound: float | None = None   # ‖w-w_bm‖₂ 硬约束上限
     active_weight_upper: float | None = None    # 单票主动偏离上限 |w_i - w_bm_i| ≤ δ
     risk_aversion: float | None = None
+    te_upper: float | None = None               # 年化跟踪误差硬上限（0.05=5%）
+
+    def __post_init__(self) -> None:
+        if self.te_upper is not None:
+            if self.te_upper <= 0:
+                raise ValueError(f"te_upper 必须为正，收到 {self.te_upper}")
+            if self.risk_aversion is not None:
+                raise ValueError(
+                    "te_upper 与 risk_aversion 不可同时设置："
+                    "前者以硬约束直接指定跟踪误差，后者以软惩罚间接控制，"
+                    "二者是同一权衡的两种参数化。请只保留一个。"
+                )
 
 
 class IndexEnhanceOptimizer:
@@ -212,17 +241,30 @@ class IndexEnhanceOptimizer:
         if cfg.weight_diff_l2_bound is not None:
             constraints.append(cp.norm(w - w_bm, 2) <= cfg.weight_diff_l2_bound)
 
+        # 9. 跟踪误差硬上限（年化）。启用后关闭目标函数的风险惩罚项：
+        #    TE 已被硬约束限定，再加软惩罚等于对同一风险重复收费，
+        #    会把解拉到上限以内、失去"直接指定 TE"的语义。
+        te_constrained = cfg.te_upper is not None
+        if te_constrained:
+            if risk_snapshot is None:
+                raise ValueError(
+                    "启用 te_upper 需要 optimize(risk_snapshot=...) 提供 CNE6 风险模型；"
+                    "若只想约束权重偏离，请改用 weight_diff_l2_bound。"
+                )
+            te_var = risk_quadratic_form(
+                w - w_bm, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
+            )
+            constraints.append(te_var <= annualized_variance_cap(cfg.te_upper))
+
         # 目标函数：max w'α - 主动风险惩罚 - λ·Σ c_i|Δw_i|
         # 风险项：优先 CNE6 因子风险模型 λ·(active'XFX'active + δ'active²)，
         #         未提供时退回 L2 偏离惩罚 γ·‖w-w_bm‖²（向后兼容）
-        if cfg.risk_aversion is not None and risk_snapshot is not None:
-            active = w - w_bm
-            X = risk_snapshot.X                       # (N, K)
-            F = risk_snapshot.F                       # (K, K)
-            delta = risk_snapshot.delta               # (N,)
-            factor_te = cp.quad_form(X.T @ active, cp.psd_wrap(F))
-            specific_te = cp.sum(cp.multiply(delta, cp.square(active)))
-            risk_penalty = cfg.risk_aversion * (factor_te + specific_te)
+        if te_constrained:
+            risk_penalty = 0.0
+        elif cfg.risk_aversion is not None and risk_snapshot is not None:
+            risk_penalty = cfg.risk_aversion * risk_quadratic_form(
+                w - w_bm, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
+            )
         elif cfg.risk_aversion == 0.0:
             # 显式设 risk_aversion=0：完全关闭风险惩罚（无论有无 risk_snapshot）
             risk_penalty = 0.0
@@ -233,10 +275,18 @@ class IndexEnhanceOptimizer:
 
         prob = cp.Problem(objective, constraints)
         failure = solve_with_fallback(prob)
+        # TE 上限与成分股下限/行业偏离/换手上限叠加时很容易不可行，
+        # 笼统的 "infeasible" 无法指向病因，故在原因里点名 TE 约束。
+        te_hint = (
+            f"（已启用 te_upper={cfg.te_upper:.2%} 硬约束，"
+            "与成分股/行业/换手约束叠加可能不可行，可先放宽本项排查）"
+            if te_constrained
+            else ""
+        )
         if failure is not None:
-            return IndexEnhanceResult.infeasible(tickers, failure)
+            return IndexEnhanceResult.infeasible(tickers, f"{failure}{te_hint}")
         if prob.status not in ("optimal", "optimal_inaccurate"):
-            return IndexEnhanceResult.infeasible(tickers, prob.status)
+            return IndexEnhanceResult.infeasible(tickers, f"{prob.status}{te_hint}")
 
         weights = finalize_weights(np.array(w.value, dtype=float), masks)
         violations = common_constraint_violations(
@@ -278,6 +328,18 @@ class IndexEnhanceOptimizer:
         if cfg.weight_diff_l2_bound is not None:
             violations["weight_diff_l2"] = max_positive_violation(
                 np.linalg.norm(weights - w_bm) - cfg.weight_diff_l2_bound
+            )
+        if te_constrained:
+            # 与其他硬约束一视同仁做求解后校验：数值求解可能轻微越界，
+            # 超出容差即拒绝发布，避免"声称 TE≤5% 实则更高"的组合流入生产。
+            realized_te = realized_annual_vol(
+                weights - w_bm,
+                risk_snapshot.X,
+                risk_snapshot.F,
+                risk_snapshot.delta,
+            )
+            violations["tracking_error_upper"] = max_positive_violation(
+                realized_te - cfg.te_upper
             )
         failures = post_solve_failures(violations)
         if failures:

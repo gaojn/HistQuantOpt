@@ -59,6 +59,59 @@ _VALID_SOURCES = {
 }
 
 
+def equal_weight_benchmark_weights(adj_close: pd.DataFrame) -> pd.DataFrame:
+    """按每个交易日的有效复权收盘价股票构造全市场等权权重。"""
+    prices = adj_close.copy()
+    prices.index = pd.to_datetime(prices.index)
+    prices = prices.sort_index()
+    valid = (prices.notna() & prices.gt(0)).astype(float)
+    row_sum = valid.sum(axis=1).replace(0.0, np.nan)
+    return valid.div(row_sum, axis=0).fillna(0.0)
+
+
+def benchmark_returns_from_rebalance_weights(
+    benchmark_weight_df: pd.DataFrame,
+    adj_close: pd.DataFrame,
+    rebalance_dates: list[pd.Timestamp] | pd.DatetimeIndex,
+) -> pd.Series:
+    """用调仓日基准权重计算 ``(T_i, T_{i+1}]`` 持有期收益。
+
+    权重在每个信号日收盘确定，从下一交易日开始生效；持有期内保持不变。
+    该口径与 :class:`ReturnAttributor` 一致，用于让回测与归因共享同一基准。
+    """
+    weights = benchmark_weight_df.copy()
+    weights.index = pd.to_datetime(weights.index)
+    weights = weights.sort_index()
+    prices = adj_close.copy()
+    prices.index = pd.to_datetime(prices.index)
+    prices = prices.sort_index()
+    signal_dates = list(pd.DatetimeIndex(pd.to_datetime(rebalance_dates)).sort_values())
+    if not signal_dates:
+        raise ValueError("rebalance_dates 为空")
+
+    daily_ret = prices.pct_change(fill_method=None)
+    rows: dict[pd.Timestamp, float] = {}
+    for i, signal_date in enumerate(signal_dates):
+        next_signal = signal_dates[i + 1] if i + 1 < len(signal_dates) else None
+        period_dates = [
+            day
+            for day in prices.index
+            if day > signal_date and (next_signal is None or day <= next_signal)
+        ]
+        if not period_dates:
+            continue
+        available = weights.index[weights.index <= signal_date]
+        if available.empty:
+            continue
+        benchmark_weight = weights.loc[available[-1]].dropna()
+        benchmark_weight = benchmark_weight[benchmark_weight != 0.0]
+        for day in period_dates:
+            returns = daily_ret.loc[day].reindex(benchmark_weight.index).fillna(0.0)
+            rows[day] = float(benchmark_weight @ returns)
+
+    return pd.Series(rows, dtype=float, name="benchmark_return").sort_index()
+
+
 class BenchmarkPriceCoverageError(ValueError):
     """官方快照成分缺少锚点或目标日价格，无法安全漂移。"""
 

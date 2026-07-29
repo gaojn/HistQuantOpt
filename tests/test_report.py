@@ -78,6 +78,7 @@ def test_generate_html_report_includes_turnover_summary(tmp_path: Path):
     assert "双边换手" in html
     assert "所有 Calmar 均为对应区间" in html
     assert "不做年化" in html
+    assert '"marker":{"color":"#c0392b"' in html
 
     yearly = pd.read_parquet(tmp_path / "report_data" / "yearly.parquet")
     assert {"rebalance_count", "turnover", "avg_turnover"}.issubset(yearly.columns)

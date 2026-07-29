@@ -240,7 +240,7 @@ def test_second_period_prev_weight_uses_failed_execution_state(tmp_path, monkeyp
             "turnover_penalty": 0.0,
             "style_bound": None,
         },
-        "alpha": {"source": "file"},
+        "alpha": {"source": "file", "synthetic": False},
         "execution": {"cost_buy": 0.0, "cost_sell": 0.0},
         "output": {"weights": str(tmp_path / "weights.parquet")},
     }
@@ -263,10 +263,11 @@ def test_second_period_prev_weight_uses_failed_execution_state(tmp_path, monkeyp
     batch.run_batch_optimize(config, panel=panel, alpha_df=alpha)
 
     assert optimizer.prev_weights[0] is None
-    # T+1（1/3）A 涨停未成交；新调仓日（1/4）虽恢复交易，也必须先取消旧目标，
-    # 因而第二期优化仍看到全现金，而不是当天补买旧目标 A。
+    # T+1（1/3）A 涨停未成交；新调仓日（1/4）恢复交易后先补买旧目标 A，
+    # 第二期优化必须看到信号日成交后的真实持仓。
     assert optimizer.prev_weights[1] is not None
-    assert optimizer.prev_weights[1].sum() == 0.0
+    assert optimizer.prev_weights[1][0] == pytest.approx(1.0)
+    assert optimizer.prev_weights[1].sum() == pytest.approx(1.0)
 
 
 def test_snapshot_failure_candidate_executes_old_pending_target(
@@ -713,10 +714,23 @@ def _alpha_config(tmp_path) -> dict:
             "turnover_penalty": 0.0,
             "style_bound": None,
         },
-        "alpha": {"source": "file"},
+        "alpha": {"source": "file", "synthetic": False},
         "execution": {"cost_buy": 0.0, "cost_sell": 0.0},
         "output": {"weights": str(tmp_path / "weights.parquet")},
     }
+
+
+def test_preloaded_alpha_cannot_bypass_metadata_validation(tmp_path):
+    """预载矩阵也必须先校验 source/synthetic，不能因提前返回而绕过。"""
+    config = _alpha_config(tmp_path)
+    config["alpha"] = {}
+    alpha = pd.DataFrame(
+        {"A": [1.0], "B": [0.0]},
+        index=pd.to_datetime(["2024-01-02"]),
+    )
+
+    with pytest.raises(ValueError, match="缺少 alpha.source"):
+        batch.run_batch_optimize(config, panel=_panel(), alpha_df=alpha)
 
 
 def test_stale_alpha_is_warned_but_still_optimized(tmp_path, monkeypatch, caplog):
@@ -927,26 +941,25 @@ def _dates(*days: int) -> list[date]:
     return [date(2024, 1, d) for d in days]
 
 
-def test_walker_settles_prior_days_then_only_marks_signal_day():
-    """调仓日之前的交易日照常成交；信号日只更新估值，不执行旧目标。"""
+def test_walker_settles_prior_days_and_executes_old_target_on_signal_day():
+    """调仓日之前及信号日均按序执行，收盘后才能由新目标覆盖。"""
     dates = _dates(2, 3, 4, 5)
     ledger, walker = _make_walker(dates)
 
     walker.open_signal_day(date(2024, 1, 4))
 
-    assert [kind for kind, _ in ledger.calls] == ["step", "step", "mark"]
-    assert ledger.calls[-1][0] == "mark"
+    assert [kind for kind, _ in ledger.calls] == ["step", "step", "step"]
+    assert ledger.calls[-1] == ("step", date(2024, 1, 4))
 
 
-def test_walker_replay_signal_day_resumes_old_target():
-    """该调仓日未发布新目标时，信号日要补一次正常成交尝试。"""
+def test_walker_executes_signal_day_exactly_once():
+    """信号日的旧目标只执行一次，不依赖求解结果二次回放。"""
     dates = _dates(2, 3)
     ledger, walker = _make_walker(dates)
 
-    signal_day = walker.open_signal_day(date(2024, 1, 2))
-    walker.replay_signal_day(signal_day)
+    walker.open_signal_day(date(2024, 1, 2))
 
-    assert [kind for kind, _ in ledger.calls] == ["mark", "step"]
+    assert ledger.calls == [("step", date(2024, 1, 2))]
 
 
 def test_walker_does_not_rewind_across_rebalance_dates():
@@ -972,7 +985,7 @@ def test_walker_finish_advances_remaining_days():
     walker.finish()
 
     stepped = [d for kind, d in ledger.calls if kind == "step"]
-    assert stepped == _dates(3, 4, 5)
+    assert stepped == _dates(2, 3, 4, 5)
 
 
 def test_walker_rejects_rebalance_date_outside_trading_calendar():

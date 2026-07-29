@@ -478,7 +478,7 @@ class ExecutionLedger:
             self.pending_target = None
 
     def cancel_pending_target(self) -> None:
-        """在新调仓日取消旧目标，不成交、不计过期并重置目标级状态。"""
+        """显式取消当前目标，不成交、不计过期并重置目标级状态。"""
         self.pending_target = None
         self.pending_tickers.clear()
         self.frozen_tickers.clear()

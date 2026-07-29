@@ -1,8 +1,11 @@
 """指数收盘价加载器测试（自带临时 CSV，不依赖本地数据文件）。"""
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 from hqopt.data.index_close import (
+    DEFAULT_PATH,
     available_indices,
     load_index_close,
     load_index_returns,
@@ -20,6 +23,15 @@ def csv_path(tmp_path):
     p = tmp_path / "idx.csv"
     p.write_text(CSV, encoding="utf-8")
     return p
+
+
+def test_default_path_is_absolute_and_independent_of_cwd(tmp_path, monkeypatch):
+    expected = Path(__file__).resolve().parents[1] / "data/指数收盘价信息.csv"
+
+    monkeypatch.chdir(tmp_path)
+
+    assert DEFAULT_PATH.is_absolute()
+    assert expected == DEFAULT_PATH
 
 
 def test_load_close_by_key(csv_path):

@@ -33,6 +33,7 @@ def _frames(*, shifted: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def _stats(*, shifted: bool = False) -> dict[str, object]:
     return {
+        "alpha_quality": {"synthetic": shifted},
         "expired_order_count": 1 if shifted else 0,
         "expired_notional": 100.0 if shifted else 0.0,
         "target_pending": shifted,

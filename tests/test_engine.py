@@ -88,8 +88,8 @@ def test_non_trading_rebalance_date_rejected():
         _run(weight_df, frames)
 
 
-def test_new_rebalance_cancels_old_target_before_step(monkeypatch):
-    """新调仓日直接撤销旧单；新目标仅在下一交易日从第 1 次尝试开始。"""
+def test_new_rebalance_executes_old_target_before_replacement(monkeypatch):
+    """新调仓日先执行旧目标；收盘后新目标才覆盖剩余订单。"""
     dates = pd.bdate_range("2024-01-02", periods=4)
     frames = _frames(dates, ["A", "B"])
 
@@ -112,11 +112,36 @@ def test_new_rebalance_cancels_old_target_before_step(monkeypatch):
     monkeypatch.setattr(engine_module, "ExecutionLedger", RecordingLedger)
     result, stats = _run(weights, frames)
 
-    assert result.actual_weights.loc[dates[2]].sum() == pytest.approx(0.0)
+    assert result.actual_weights.loc[dates[2], "A"] > 0.99
     assert result.actual_weights.loc[dates[3]].get("A", 0.0) == pytest.approx(0.0)
     assert result.actual_weights.loc[dates[3], "B"] > 0.99
-    assert attempts == [0, 1, 0, 1]
+    assert attempts == [0, 1, 2, 1]
     assert stats["order_states"]["B"] == "filled"
+
+
+def test_daily_targets_execute_previous_close_signal():
+    """连续日频目标按 T+1 执行，不会在首次成交前被下一目标撤销。"""
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    frames = _frames(dates, ["A", "B"])
+    weights = pd.DataFrame(
+        {
+            "A": [1.0, 0.9, 0.8, 0.7],
+            "B": [0.0, 0.1, 0.2, 0.3],
+        },
+        index=dates[:4],
+    )
+
+    result, stats = _run(weights, frames)
+
+    assert result.actual_weights.loc[dates[0]].sum() == pytest.approx(0.0)
+    assert result.actual_weights.loc[dates[1], "A"] > 0.99
+    assert result.actual_weights.loc[dates[2], "A"] == pytest.approx(0.9, abs=2e-3)
+    assert result.actual_weights.loc[dates[2], "B"] == pytest.approx(0.1, abs=2e-3)
+    assert result.actual_weights.loc[dates[3], "A"] == pytest.approx(0.8, abs=2e-3)
+    assert result.actual_weights.loc[dates[3], "B"] == pytest.approx(0.2, abs=2e-3)
+    assert result.actual_weights.loc[dates[4], "A"] == pytest.approx(0.7, abs=2e-3)
+    assert result.actual_weights.loc[dates[4], "B"] == pytest.approx(0.3, abs=2e-3)
+    assert stats["expired_order_count"] == 0
 
 
 # ── 涨停拦截买入 ─────────────────────────────────────────────────

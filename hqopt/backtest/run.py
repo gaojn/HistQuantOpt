@@ -27,11 +27,16 @@ from hqopt.backtest.execution import (
     validate_sell_only_manifest,
 )
 from hqopt.backtest.report import generate_html_report
-from hqopt.constants import SYNTHETIC_ALPHA_WARNING_FILE
+from hqopt.data.benchmark import (
+    benchmark_returns_from_rebalance_weights,
+    equal_weight_benchmark_weights,
+)
 from hqopt.data.index_close import load_index_returns
 from hqopt.io.data_panel import load_panel
 
 logger = logging.getLogger(__name__)
+
+_EQUAL_WEIGHT_BENCHMARK = "equal_weight"
 
 
 def _save_execution_stats(stats: dict[str, Any], path: str | Path) -> Path:
@@ -49,13 +54,6 @@ def _save_execution_stats(stats: dict[str, Any], path: str | Path) -> Path:
         encoding="utf-8",
     )
     return output_path
-
-
-def _load_warning_banner(weight_path: str | Path) -> str | None:
-    warning_path = Path(weight_path).parent / SYNTHETIC_ALPHA_WARNING_FILE
-    if not warning_path.exists():
-        return None
-    return warning_path.read_text(encoding="utf-8").strip() or None
 
 
 def _load_weights(path: str | Path) -> pd.DataFrame:
@@ -155,7 +153,7 @@ def run_backtest(
     ----------
     weight_path : 权重 parquet 路径（长表或宽表）
     start_date / end_date : 回测区间（权重早于 start 的记录会被裁剪）
-    index       : 基准指数 key（hs300 / zz500 / zz1000 / csiall ...）
+    index       : 基准 key（equal_weight / hs300 / zz500 / zz1000 / csiall ...）
     cost_buy / cost_sell : 买/卖费率（非对称），默认 1‰ / 2‰
     risk_free   : 无风险年化利率（Sharpe 用）
     initial_value : 初始资金（元）
@@ -187,8 +185,6 @@ def run_backtest(
     )
     if sell_only_df is not None:
         sell_only_df = sell_only_df.loc[weight_df.index]
-    warning_banner = _load_warning_banner(weight_path)
-
     actual_start = weight_df.index.min().date()
     actual_end = weight_df.index.max().date()
     n_stocks = (weight_df > 1e-6).any(axis=0).sum()
@@ -215,13 +211,22 @@ def run_backtest(
     trade_status_w = _to_wide(panel, "trade_status")
 
     # ── 4. 基准收益 ──────────────────────────────────────────
-    logger.info(f"\n[4] 加载基准收益（{index.upper()}）...")
-    index_close_kwargs = {} if index_close_path is None else {"path": index_close_path}
-    bm_ret = (
-        load_index_returns(index, start=str(t1), end=str(t2), **index_close_kwargs)
-        .reindex(adj_close_w.index[adj_close_w.index >= pd.Timestamp(t1)])
-        .fillna(0.0)
-    )
+    if index == _EQUAL_WEIGHT_BENCHMARK:
+        logger.info("\n[4] 构建基准收益（全市场等权）...")
+        benchmark_weights = equal_weight_benchmark_weights(adj_close_w)
+        bm_ret = benchmark_returns_from_rebalance_weights(
+            benchmark_weights,
+            adj_close_w,
+            list(weight_df.index),
+        )
+    else:
+        logger.info(f"\n[4] 加载基准收益（{index.upper()}）...")
+        index_close_kwargs = {} if index_close_path is None else {"path": index_close_path}
+        bm_ret = (
+            load_index_returns(index, start=str(t1), end=str(t2), **index_close_kwargs)
+            .reindex(adj_close_w.index[adj_close_w.index >= pd.Timestamp(t1)])
+            .fillna(0.0)
+        )
 
     # ── 5. 回测 ──────────────────────────────────────────────
     logger.info("\n[5] 执行回测（T+1 VWAP，涨跌停/停牌，非对称成本）...")
@@ -252,10 +257,14 @@ def run_backtest(
     if out_dir is not None:
         out_path = Path(out_dir)
         out_path.mkdir(parents=True, exist_ok=True)
-        report_title = title or f"回测报告  {index.upper()}基准  {actual_start}~{actual_end}"
+        benchmark_label = (
+            "全市场等权" if index == _EQUAL_WEIGHT_BENCHMARK else index.upper()
+        )
+        report_title = title or (
+            f"回测报告  {benchmark_label}基准  {actual_start}~{actual_end}"
+        )
         report_path = generate_html_report(
             result, output_path=out_path / "report.html", title=report_title,
-            warning_banner=warning_banner,
         )
         logger.info(f"\n  HTML 报告：{report_path}")
         nav_df = pd.DataFrame({

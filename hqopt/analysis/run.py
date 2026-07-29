@@ -16,6 +16,7 @@ import pandas as pd
 import polars as pl
 
 from hqopt.analysis.attribution import AttributionResult, ReturnAttributor
+from hqopt.analysis.report import generate_attribution_html
 from hqopt.backtest.engine import RealisticBacktester
 from hqopt.backtest.run import (
     _align_sell_only_metadata,
@@ -27,14 +28,17 @@ from hqopt.backtest.run import (
 from hqopt.data.benchmark import (
     DEFAULT_MAX_SNAPSHOT_AGE_DAYS,
     IndexBenchmarkWeights,
+    equal_weight_benchmark_weights,
 )
 from hqopt.io.data_panel import load_panel
 from hqopt.risk import CNE6RiskModel, FactorReturnLoader
 
 logger = logging.getLogger(__name__)
 
-# 有官方成分权重的指数；其余 index 值（如 all/csiall）退回全市场等权基准
+# 有官方成分权重的指数；全市场等权必须显式使用 equal_weight，禁止把
+# csiall 等指数名称静默解释为另一种基准。
 _CONSTITUENT_INDICES = {"hs300", "zz500", "zz1000"}
+_EQUAL_WEIGHT_BENCHMARK = "equal_weight"
 
 # 覆盖率低于此阈值的交易日会被单独提示（见 attribution.py 顶部"已知局限"）
 _LOW_COVERAGE_WARN = 0.8
@@ -50,14 +54,6 @@ def _to_wide(panel: pl.DataFrame, col: str) -> pd.DataFrame:
     wide.index = pd.to_datetime(wide.index)
     wide.columns.name = None
     return wide
-
-
-def _equal_weight_benchmark(adj_close: pd.DataFrame) -> pd.DataFrame:
-    """全市场等权基准：与 RealisticBacktester 无基准时的默认口径一致
-    （见 backtest/engine.py 的 ``benchmark_ret is None`` 分支）。"""
-    valid = (adj_close.notna() & (adj_close > 0)).astype(float)
-    row_sum = valid.sum(axis=1)
-    return valid.div(row_sum.replace(0, pd.NA), axis=0).fillna(0.0)
 
 
 def _parse_date(s: str | date | pd.Timestamp) -> date:
@@ -89,7 +85,8 @@ def run_attribution(
     ----------
     weight_path : 权重 parquet（长表或宽表）
     start_date / end_date : 归因区间
-    index       : 基准。hs300/zz500/zz1000 用指数成分权重；其余退回全市场等权。
+    index       : 基准。equal_weight 用全市场等权；hs300/zz500/zz1000
+        用指数成分权重。
     benchmark_weight_source : official_drift（默认）/official_frozen/reconstruct。
     benchmark_max_snapshot_age_days : official_drift 快照最大陈旧自然日数。
     out_dir     : 输出目录，None 则不落地文件
@@ -180,9 +177,15 @@ def run_attribution(
         bm.precompute(t1, t2, panel=panel)
         bm_matrix = bm.get_weights_matrix(list(weight_df.index.date), tickers=None)
         bm_matrix.index = pd.to_datetime(bm_matrix.index)
+    elif index == _EQUAL_WEIGHT_BENCHMARK:
+        logger.info("  使用全市场等权基准")
+        bm_matrix = equal_weight_benchmark_weights(adj_close)
     else:
-        logger.info("  非成分指数，退回全市场等权基准")
-        bm_matrix = _equal_weight_benchmark(adj_close)
+        supported = sorted(_CONSTITUENT_INDICES | {_EQUAL_WEIGHT_BENCHMARK})
+        raise ValueError(
+            f"归因基准 {index!r} 不支持；可选 {supported}。"
+            "CSIALL 缺少官方成分权重，不能静默退回等权。"
+        )
 
     # ── 4. CNE6 风险模型 + 因子收益 ──────────────────────────
     tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6_S(默认/短周期S)"
@@ -204,6 +207,7 @@ def run_attribution(
         bm_matrix,
         adj_close,
         actual_weight_df=execution_result.actual_weights,
+        realized_portfolio_return=execution_result.daily_ret,
     )
 
     logger.info(f"\n{'='*60}\n  收益归因  {t1}~{t2}  基准={index}\n{'='*60}")
@@ -234,9 +238,19 @@ def run_attribution(
             + "\n",
             encoding="utf-8",
         )
+        report_path = generate_attribution_html(
+            result,
+            out_path / "attribution_report.html",
+            benchmark=index,
+            model_name=tag,
+        )
         logger.info(f"\n  归因汇总：{out_path / 'attribution_summary.csv'}")
         logger.info(f"  逐日明细：{out_path / 'attribution_daily.parquet'}")
+        logger.info(
+            f"  因子明细：{out_path / 'attribution_factor_daily.parquet'}"
+        )
         logger.info(f"  成交统计：{out_path / 'attribution_execution_stats.json'}")
+        logger.info(f"  HTML 报告：{report_path}")
 
     return result
 

@@ -9,6 +9,7 @@ import pytest
 
 import hqopt.backtest.run as runmod
 from hqopt.backtest.execution import (
+    publish_batch_bundle,
     sell_only_manifest_path_for_weights,
     sell_only_path_for_weights,
     write_sell_only_manifest,
@@ -16,21 +17,9 @@ from hqopt.backtest.execution import (
 from hqopt.backtest.run import (
     _align_sell_only_metadata,
     _load_sell_only_metadata,
-    _load_warning_banner,
     _save_execution_stats,
     run_backtest,
 )
-from hqopt.constants import SYNTHETIC_ALPHA_WARNING_FILE
-
-
-def test_load_warning_banner_from_weights_directory(tmp_path):
-    weights = tmp_path / "weights.parquet"
-    assert _load_warning_banner(weights) is None
-
-    warning = tmp_path / SYNTHETIC_ALPHA_WARNING_FILE
-    warning.write_text("含未来信息，禁止用于实盘。\n", encoding="utf-8")
-
-    assert _load_warning_banner(weights) == "含未来信息，禁止用于实盘。"
 
 
 def test_save_execution_stats_records_expired_orders(tmp_path):
@@ -181,37 +170,41 @@ def test_run_backtest_applies_sell_only_sidecar(tmp_path, monkeypatch):
         for ticker in ("A", "B")
     ]
     monkeypatch.setattr(runmod, "load_panel", lambda *args, **kwargs: pl.DataFrame(rows))
-    monkeypatch.setattr(
-        runmod,
-        "load_index_returns",
-        lambda *args, **kwargs: pd.Series(
-            0.0,
-            index=pd.to_datetime(dates),
-        ),
-    )
+    def reject_index_returns(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("equal_weight 不应读取指数收益")
+
+    monkeypatch.setattr(runmod, "load_index_returns", reject_index_returns)
 
     weights = pd.DataFrame(
         {"A": [0.6, 0.8], "B": [0.4, 0.2]},
         index=pd.to_datetime(["2024-01-02", "2024-01-04"]),
     )
     weight_path = tmp_path / "weights.parquet"
-    weights.to_parquet(weight_path)
-    pd.DataFrame(
+    sell_only = pd.DataFrame(
         {"A": [False, True], "B": [False, False]},
         index=weights.index,
-    ).to_parquet(sell_only_path_for_weights(weight_path))
-    write_sell_only_manifest(weight_path)
-
+    )
+    publish_batch_bundle(
+        weights,
+        sell_only,
+        {"alpha_quality": {"synthetic": True}},
+        weight_path,
+    )
     _, stats = run_backtest(
         weight_path,
         "2024-01-02",
         "2024-01-08",
-        index="all",
+        index="equal_weight",
         cost_buy=0.0,
         cost_sell=0.0,
         risk_free=0.0,
+        out_dir=tmp_path / "report",
     )
 
     assert stats["final_actual_weights"]["A"] == pytest.approx(0.6)
     assert stats["final_actual_weights"]["B"] == pytest.approx(0.2)
     assert stats["final_cash_pct"] == pytest.approx(0.2)
+    html = (tmp_path / "report" / "report.html").read_text(encoding="utf-8")
+    assert "全市场等权基准" in html
+    assert "回测业绩完全不可信" not in html

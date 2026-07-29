@@ -25,7 +25,7 @@ from plotly.subplots import make_subplots
 from hqopt.backtest.engine import BacktestResult
 
 # 换手一节的主色（柱状图与指标卡片左边框共用，保持同组视觉一致）
-_TURNOVER_COLOR = "#1f618d"
+_TURNOVER_COLOR = "#c0392b"
 
 # ─────────────────────────────────────────────────────────────────
 # 工具：年度绩效计算

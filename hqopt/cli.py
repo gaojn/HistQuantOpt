@@ -33,11 +33,15 @@ _DATA_SCRIPTS = {
 
 
 def _override_alpha_file(cfg: dict, alpha_file: str | None) -> None:
-    """CLI 显式替换 Alpha 时按真实外部信号处理；合成文件应改 YAML 声明。"""
+    """CLI 只替换 Alpha 文件路径，不推断或改写其可信度声明。"""
     if alpha_file:
-        cfg["alpha"]["source"] = "file"
-        cfg["alpha"]["path"] = alpha_file
-        cfg["alpha"]["synthetic"] = False
+        alpha_cfg = cfg["alpha"]
+        # source=synthetic 本身就是可信度声明；改成文件来源前必须将其固化，
+        # 否则一个 --alpha-file 就能把含前视信号静默降级成“真实”文件。
+        if alpha_cfg.get("source") == "synthetic":
+            alpha_cfg["synthetic"] = True
+        alpha_cfg["source"] = "file"
+        alpha_cfg["path"] = alpha_file
 
 
 def _start_run_manifest(
@@ -121,20 +125,119 @@ def cmd_optimize(args: argparse.Namespace) -> None:
         raise
 
 
+def _default_backtest_out_dir(weight_path: str | Path) -> Path:
+    """标准权重写回策略目录；外部权重统一写到项目 output/backtest。"""
+    resolved = Path(weight_path).expanduser().resolve()
+    output_root = (ROOT / "output").resolve()
+    try:
+        resolved.relative_to(output_root)
+    except ValueError:
+        return output_root / "backtest"
+    return resolved.parent
+
+
+def _start_standalone_manifest(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    output_dir: str | Path,
+    effective_config: dict,
+):
+    """为无 YAML 配置的独立命令冻结参数、代码状态和权重输入。"""
+    from hqopt.io.run_manifest import (
+        RunManifestRecorder,
+        execution_bundle_inputs,
+    )
+
+    return RunManifestRecorder.start(
+        mode=mode,
+        config=effective_config,
+        config_path=None,
+        output_dir=output_dir,
+        command=[str(value) for value in sys.argv],
+        data_lock=None,
+        input_files=execution_bundle_inputs(args.weights),
+    )
+
+
+def _finish_standalone_manifest(
+    recorder,
+    *,
+    mode: str,
+    output_dir: str | Path,
+    error: Exception | None = None,
+) -> None:
+    """完成独立命令清单；失败也保留不可覆盖的审计记录。"""
+    from hqopt.io.run_manifest import expected_standalone_artifacts
+
+    if error is not None:
+        unique, _ = recorder.finalize(
+            status="failed",
+            artifacts=[],
+            quality_checks={"data_lock": "not_verified"},
+            error=f"{type(error).__name__}: {error}",
+        )
+        logger.error("失败运行清单已保存：%s", unique)
+        return
+
+    artifacts = expected_standalone_artifacts(output_dir, mode=mode)
+    unique, _ = recorder.finalize(
+        status="complete",
+        artifacts=artifacts,
+        quality_checks={
+            "data_lock": "not_verified",
+            "input_contract": "validated_or_explicit_external_weights",
+        },
+    )
+    logger.info("运行清单已保存：%s", unique)
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     from hqopt.backtest.run import run_backtest
     # risk_free: None 时 run_backtest 使用默认值 0.02
     rf = args.risk_free if hasattr(args, "risk_free") and args.risk_free is not None else None
-    run_backtest(
-        args.weights, args.start, args.end, index=args.index,
-        cost_buy=args.cost_buy, cost_sell=args.cost_sell,
-        initial_value=args.initial_value, out_dir=args.out_dir,
-        **({} if rf is None else {"risk_free": rf}),
+    out_dir = args.out_dir or _default_backtest_out_dir(args.weights)
+    effective_config = {
+        "weights": str(Path(args.weights).expanduser().resolve()),
+        "start_date": args.start,
+        "end_date": args.end,
+        "index": args.index,
+        "cost_buy": args.cost_buy,
+        "cost_sell": args.cost_sell,
+        "risk_free": 0.02 if rf is None else rf,
+        "initial_value": args.initial_value,
+        "output_dir": str(Path(out_dir).expanduser().resolve()),
+    }
+    recorder = _start_standalone_manifest(
+        args,
+        mode="backtest",
+        output_dir=out_dir,
+        effective_config=effective_config,
     )
+    try:
+        run_backtest(
+            args.weights, args.start, args.end, index=args.index,
+            cost_buy=args.cost_buy, cost_sell=args.cost_sell,
+            initial_value=args.initial_value, out_dir=out_dir,
+            **({} if rf is None else {"risk_free": rf}),
+        )
+        _finish_standalone_manifest(
+            recorder,
+            mode="backtest",
+            output_dir=out_dir,
+        )
+    except Exception as exc:
+        _finish_standalone_manifest(
+            recorder,
+            mode="backtest",
+            output_dir=out_dir,
+            error=exc,
+        )
+        raise
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    """一站式：优化 → 回测 → 报告。基准默认 = 指增取 config.index、多头取中证全指。"""
+    """一站式：优化 → 回测 → 报告。基准默认 = 指增取 config.index、多头取全市场等权。"""
     from hqopt.backtest.run import run_backtest
     from hqopt.pipeline.batch_optimize import load_config, run_batch_optimize
 
@@ -145,7 +248,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     bench = (
         args.benchmark
         or cfg.get("backtest", {}).get("benchmark")
-        or (cfg["index"] if strategy == "index_enhance" else "csiall")
+        or (cfg["index"] if strategy == "index_enhance" else "equal_weight")
     )
 
     recorder = _start_run_manifest(args, cfg, mode="run")
@@ -173,16 +276,67 @@ def cmd_run(args: argparse.Namespace) -> None:
         raise
 
 
+def _default_attribution_out_dir(weight_path: str | Path) -> Path:
+    """标准权重留在所属策略目录；外部权重统一落到项目 output/attribution。"""
+    resolved = Path(weight_path).expanduser().resolve()
+    output_root = (ROOT / "output").resolve()
+    try:
+        resolved.relative_to(output_root)
+    except ValueError:
+        return output_root / "attribution"
+    return resolved.parent / "attribution"
+
+
 def cmd_attribute(args: argparse.Namespace) -> None:
     from hqopt.analysis.run import run_attribution
-    run_attribution(
-        args.weights, args.start, args.end, index=args.index,
-        benchmark_weight_source=args.benchmark_weight_source,
-        benchmark_max_snapshot_age_days=args.benchmark_max_snapshot_age_days,
-        out_dir=args.out_dir, cne6_data_dir=args.cne6_data_dir,
-        cost_buy=args.cost_buy, cost_sell=args.cost_sell,
-        initial_value=args.initial_value,
+    out_dir = args.out_dir or _default_attribution_out_dir(args.weights)
+    effective_config = {
+        "weights": str(Path(args.weights).expanduser().resolve()),
+        "start_date": args.start,
+        "end_date": args.end,
+        "index": args.index,
+        "benchmark_weight_source": args.benchmark_weight_source,
+        "benchmark_max_snapshot_age_days": (
+            args.benchmark_max_snapshot_age_days
+        ),
+        "cne6_data_dir": (
+            str(Path(args.cne6_data_dir).expanduser().resolve())
+            if args.cne6_data_dir is not None
+            else None
+        ),
+        "cost_buy": args.cost_buy,
+        "cost_sell": args.cost_sell,
+        "initial_value": args.initial_value,
+        "output_dir": str(Path(out_dir).expanduser().resolve()),
+    }
+    recorder = _start_standalone_manifest(
+        args,
+        mode="attribute",
+        output_dir=out_dir,
+        effective_config=effective_config,
     )
+    try:
+        run_attribution(
+            args.weights, args.start, args.end, index=args.index,
+            benchmark_weight_source=args.benchmark_weight_source,
+            benchmark_max_snapshot_age_days=args.benchmark_max_snapshot_age_days,
+            out_dir=out_dir, cne6_data_dir=args.cne6_data_dir,
+            cost_buy=args.cost_buy, cost_sell=args.cost_sell,
+            initial_value=args.initial_value,
+        )
+        _finish_standalone_manifest(
+            recorder,
+            mode="attribute",
+            output_dir=out_dir,
+        )
+    except Exception as exc:
+        _finish_standalone_manifest(
+            recorder,
+            mode="attribute",
+            output_dir=out_dir,
+            error=exc,
+        )
+        raise
 
 
 def cmd_data(what: str, extra: list[str]) -> None:
@@ -215,8 +369,16 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--weights", required=True, help="权重 parquet（长表/宽表）")
     pb.add_argument("--start", required=True, help="回测起始日 如 2020-01-01")
     pb.add_argument("--end", required=True, help="回测截止日 如 2026-05-31")
-    pb.add_argument("--index", default="zz1000", help="基准指数 key")
-    pb.add_argument("--out-dir", default=None, help="报告输出目录")
+    pb.add_argument(
+        "--index",
+        default="zz1000",
+        help="基准 key；equal_weight=全市场等权，其余为指数 key",
+    )
+    pb.add_argument(
+        "--out-dir",
+        default=None,
+        help="报告输出目录；默认策略权重目录或 output/backtest",
+    )
     pb.add_argument("--cost-buy", type=float, default=0.001)
     pb.add_argument("--cost-sell", type=float, default=0.002)
     pb.add_argument("--initial-value", type=float, default=1e8)
@@ -229,7 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument("--start", required=True, help="归因起始日 如 2020-01-01")
     pa.add_argument("--end", required=True, help="归因截止日 如 2026-05-31")
     pa.add_argument("--index", default="zz1000",
-                     help="基准：hs300/zz500/zz1000 用官方成分权重，其余（如 all/csiall）用全市场等权")
+                     help="基准：equal_weight=全市场等权；hs300/zz500/zz1000 用官方成分权重")
     pa.add_argument(
         "--benchmark-weight-source",
         choices=["official_drift", "official_frozen", "reconstruct", "official"],
@@ -242,7 +404,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="official_drift 快照最大陈旧自然日数（默认 30）",
     )
-    pa.add_argument("--out-dir", default=None, help="归因结果输出目录")
+    pa.add_argument(
+        "--out-dir",
+        default=None,
+        help="归因结果输出目录；默认 output/<策略目录>/attribution",
+    )
     pa.add_argument("--cne6-data-dir", default=None, help="CNE6 风险面板目录，默认短周期 S")
     pa.add_argument("--cost-buy", type=float, default=0.001)
     pa.add_argument("--cost-sell", type=float, default=0.002)

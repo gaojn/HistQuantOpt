@@ -40,9 +40,21 @@ def _panel() -> pl.DataFrame:
 
 class _FakeAttributionResult:
     def __init__(self) -> None:
-        self.summary = pd.DataFrame({"贡献": [0.01]}, index=["Size"])
+        self.summary = pd.DataFrame(
+            {
+                "累计贡献": [0.01, 0.01],
+                "年化贡献": [0.02, 0.02],
+                "占主动收益%": [100.0, 100.0],
+                "t统计": [1.0, 1.0],
+                "年化波动": [0.1, 0.1],
+            },
+            index=["Size", "合计(主动收益)"],
+        )
         self.daily = pd.DataFrame(
-            {"coverage_pct": [1.0, 0.5]},
+            {
+                "coverage_pct": [1.0, 0.5],
+                "relative_active_return": [0.0, 0.0],
+            },
             index=pd.to_datetime(["2024-01-03", "2024-01-04"]),
         )
         self.factor_daily = pd.DataFrame(
@@ -61,12 +73,20 @@ class _RecordingAttributor:
     def __init__(self, risk_model, factor_loader) -> None:
         del risk_model, factor_loader
 
-    def run(self, weight_df, bm_matrix, adj_close, actual_weight_df=None):
+    def run(
+        self,
+        weight_df,
+        bm_matrix,
+        adj_close,
+        actual_weight_df=None,
+        realized_portfolio_return=None,
+    ):
         _RecordingAttributor.calls.append({
             "weight_df": weight_df,
             "bm_matrix": bm_matrix,
             "adj_close": adj_close,
             "actual_weight_df": actual_weight_df,
+            "realized_portfolio_return": realized_portfolio_return,
         })
         return _FakeAttributionResult()
 
@@ -127,7 +147,7 @@ def test_run_attribution_passes_replayed_actual_weights(patched, tmp_path):
     out_dir = tmp_path / "out"
     result = run_attribution(
         patched, "2024-01-02", "2024-01-08",
-        index="all",                      # 非成分指数 → 等权基准，不依赖官方权重
+        index="equal_weight",
         out_dir=out_dir,
         cost_buy=0.0, cost_sell=0.0,
     )
@@ -136,6 +156,9 @@ def test_run_attribution_passes_replayed_actual_weights(patched, tmp_path):
     call = _RecordingAttributor.calls[-1]
     actual = call["actual_weight_df"]
     assert actual is not None
+    realized = call["realized_portfolio_return"]
+    assert realized is not None
+    assert list(realized.index) == list(actual.index)
     # T+1 成交：1/2 提交的目标从 1/3 起持有，实际权重应≈目标
     assert actual.loc[pd.Timestamp("2024-01-03"), "A"] == pytest.approx(0.6, abs=1e-6)
     assert actual.loc[pd.Timestamp("2024-01-02")].sum() == 0.0  # 首日尚未成交
@@ -168,7 +191,7 @@ def test_run_attribution_applies_sell_only_sidecar(patched):
         patched,
         "2024-01-02",
         "2024-01-08",
-        index="all",
+        index="equal_weight",
         cost_buy=0.0,
         cost_sell=0.0,
     )
@@ -182,7 +205,7 @@ def test_run_attribution_filters_weights_to_date_range(patched):
     """区间过滤生效：只保留 [start, end] 内的调仓日。"""
     run_attribution(
         patched, "2024-01-04", "2024-01-08",
-        index="all", cost_buy=0.0, cost_sell=0.0,
+        index="equal_weight", cost_buy=0.0, cost_sell=0.0,
     )
     call = _RecordingAttributor.calls[-1]
     assert list(call["weight_df"].index) == [pd.Timestamp("2024-01-04")]
@@ -192,5 +215,17 @@ def test_run_attribution_empty_range_raises(patched):
     with pytest.raises(ValueError, match="无数据"):
         run_attribution(
             patched, "2025-01-01", "2025-02-01",
-            index="all",
+            index="equal_weight",
+        )
+
+
+def test_run_attribution_rejects_csiall_without_official_weights(patched):
+    with pytest.raises(ValueError, match="CSIALL 缺少官方成分权重"):
+        run_attribution(
+            patched,
+            "2024-01-02",
+            "2024-01-08",
+            index="csiall",
+            cost_buy=0.0,
+            cost_sell=0.0,
         )

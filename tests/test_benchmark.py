@@ -8,7 +8,9 @@ import pytest
 from hqopt.data.benchmark import (
     DEFAULT_MAX_SNAPSHOT_AGE_DAYS,
     IndexBenchmarkWeights,
+    benchmark_returns_from_rebalance_weights,
     drift_official_weights,
+    equal_weight_benchmark_weights,
 )
 
 
@@ -21,6 +23,56 @@ def _make_official(path, index="zz1000"):
         "code": ["A", "B", "A", "B"],
         "weight": [0.6, 0.4, 0.5, 0.5],
     }).write_parquet(path)
+
+
+def test_equal_weight_benchmark_uses_only_valid_stocks():
+    prices = pd.DataFrame(
+        {
+            "A": [10.0, 11.0],
+            "B": [20.0, 20.0],
+            "C": [None, 30.0],
+        },
+        index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
+    )
+
+    weights = equal_weight_benchmark_weights(prices)
+
+    assert weights.loc["2024-01-02"].to_dict() == {
+        "A": pytest.approx(0.5),
+        "B": pytest.approx(0.5),
+        "C": pytest.approx(0.0),
+    }
+    assert weights.loc["2024-01-03"].to_dict() == {
+        "A": pytest.approx(1 / 3),
+        "B": pytest.approx(1 / 3),
+        "C": pytest.approx(1 / 3),
+    }
+
+
+def test_equal_weight_returns_hold_signal_day_weights_until_next_signal():
+    dates = pd.to_datetime(
+        ["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]
+    )
+    prices = pd.DataFrame(
+        {
+            "A": [10.0, 11.0, 12.1, 12.1],
+            "B": [20.0, 20.0, 20.0, 22.0],
+            "C": [None, None, 30.0, 33.0],
+        },
+        index=dates,
+    )
+    weights = equal_weight_benchmark_weights(prices)
+
+    returns = benchmark_returns_from_rebalance_weights(
+        weights,
+        prices,
+        pd.to_datetime(["2024-01-02", "2024-01-04"]),
+    )
+
+    # 1/3、1/4 沿用 1/2 的 A/B 各 50%；1/5 使用 1/4 的 A/B/C 各 1/3。
+    assert returns.loc["2024-01-03"] == pytest.approx(0.05)
+    assert returns.loc["2024-01-04"] == pytest.approx(0.05)
+    assert returns.loc["2024-01-05"] == pytest.approx(2 / 30)
 
 
 def test_official_asof_picks_latest_snapshot(tmp_path):

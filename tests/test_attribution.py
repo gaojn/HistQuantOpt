@@ -15,6 +15,11 @@ import pytest
 
 import hqopt.analysis.run as attribution_run
 from hqopt.analysis.attribution import ReturnAttributor
+from hqopt.backtest.engine import RealisticBacktester
+from hqopt.data.benchmark import (
+    benchmark_returns_from_rebalance_weights,
+    equal_weight_benchmark_weights,
+)
 from hqopt.risk.attribution_data import FactorReturnLoader
 from hqopt.risk.cne6_risk import CNE6RiskModel
 
@@ -113,6 +118,27 @@ def test_residual_zero_when_fully_covered(attributor, weight_df, benchmark_weigh
     result = attributor.run(weight_df, benchmark_weight_df, _adj_close())
     assert result.daily["residual"].abs().max() < 1e-10
     assert result.summary.loc["残差", "累计贡献"] == pytest.approx(0.0, abs=1e-10)
+
+
+def test_equal_weight_benchmark_return_matches_shared_backtest_contract(
+    attributor,
+    weight_df,
+):
+    prices = _adj_close()
+    benchmark_weights = equal_weight_benchmark_weights(prices)
+    expected = benchmark_returns_from_rebalance_weights(
+        benchmark_weights,
+        prices,
+        list(weight_df.index),
+    )
+
+    result = attributor.run(weight_df, benchmark_weights, prices)
+
+    pd.testing.assert_series_equal(
+        result.daily["benchmark_return"],
+        expected.reindex(result.daily.index),
+        check_names=False,
+    )
 
 
 def test_style_contribution_matches_hand_calc(attributor, weight_df, benchmark_weight_df):
@@ -281,10 +307,152 @@ def test_run_attribution_replays_blocked_execution(tmp_path, monkeypatch):
         weight_path,
         BASE_DATE.date(),
         TRADING_DATES[-1].date(),
-        index="all",
+        index="equal_weight",
         cne6_data_dir=tmp_path,
         cost_buy=0.0,
         cost_sell=0.0,
     )
 
     assert result.daily.iloc[:3]["specific"].values == pytest.approx(-0.0005, abs=1e-9)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  归因组合收益必须与真实净值一致（防同日权重前视）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _drifting_actual_weights(adj_close: pd.DataFrame, w0: dict) -> pd.DataFrame:
+    """买入持有下逐日**收盘后**的实际权重——与回测账本的写入时点一致。
+
+    回测引擎在当日 mark-to-market 之后才记录 actual_weight（backtest/engine.py），
+    因此每一行都已含当日涨跌，随价格逐日漂移。这正是能照出同日自我引用的形态；
+    旧测试用的分段常数权重不漂移，照不出来。
+    """
+    px = adj_close.loc[[BASE_DATE, *TRADING_DATES]]
+    shares = pd.Series(w0) / px.loc[BASE_DATE]
+    value = px.mul(shares, axis=1)
+    return value.div(value.sum(axis=1), axis=0)
+
+
+def test_portfolio_return_reproduces_buy_and_hold_nav(
+    attributor, weight_df, benchmark_weight_df
+):
+    """归因的组合日收益连乘必须等于真实买入持有净值。
+
+    这是防前视的核心断言：``actual_weight_df`` 的第 d 行是 d 日**收盘后**权重，
+    必须配 d+1 日收益。若错配成同日，会凭空多出 Σ w_i·r_i²（截面收益方差，
+    恒为正），实测可达 +11%/年，且主要堆进「特质(选股)」项。
+
+    注意残差自检（test_residual_zero_when_fully_covered）挡不住这个 bug：
+    explained 与 active_return 用同一个有偏权重，偏差两边同步出现、相减抵消，
+    残差恒为 0 而两边都错。故必须直接对齐外部真值——净值。
+    """
+    adj_close = _adj_close()
+    w0 = {"A": 0.6, "B": 0.4}
+    actual = _drifting_actual_weights(adj_close, w0)
+
+    result = attributor.run(
+        weight_df, benchmark_weight_df, adj_close, actual_weight_df=actual,
+    )
+
+    # 真值：期初 w0 买入后持有不动，区间末净值（区间 = 首个调仓日之后的全部交易日）
+    px = adj_close.loc[[BASE_DATE, *TRADING_DATES]]
+    shares = pd.Series(w0) / px.loc[BASE_DATE]
+    nav = px.mul(shares, axis=1).sum(axis=1)
+    true_total = nav.iloc[-1] / nav.iloc[0] - 1.0
+
+    attributed = (1.0 + result.daily["portfolio_return"]).prod() - 1.0
+    assert attributed == pytest.approx(true_total, abs=1e-12), (
+        f"归因组合收益 {attributed:+.6%} 与真实净值 {true_total:+.6%} 不符；"
+        "差额恒为正通常意味着用了同日权重（前视）"
+    )
+
+
+def test_execution_effect_reconciles_delayed_vwap_and_fee_nav(
+    attributor, benchmark_weight_df
+):
+    """延期到 T+3 且 VWAP≠收盘、费用非零时，归因组合收益仍须等于回测 NAV。"""
+    adj_close = _adj_close()
+    weight_df = pd.DataFrame(
+        {"A": [0.6], "B": [0.4]},
+        index=[BASE_DATE],
+    )
+    adj_vwap = adj_close.copy()
+    execution_day = TRADING_DATES[2]
+    adj_vwap.loc[execution_day] = adj_close.loc[execution_day] * 0.95
+    close_raw = adj_close.copy()
+    limit_up = adj_close * 2.0
+    limit_down = adj_close * 0.5
+    trade_status = pd.DataFrame(
+        "交易",
+        index=adj_close.index,
+        columns=adj_close.columns,
+    )
+    trade_status.loc[TRADING_DATES[:2]] = "停牌"
+
+    backtest_result, _ = RealisticBacktester(
+        cost_buy=0.01,
+        cost_sell=0.02,
+        risk_free=0.0,
+    ).run(
+        weight_df=weight_df,
+        adj_close=adj_close,
+        adj_vwap=adj_vwap,
+        close_raw=close_raw,
+        limit_up_df=limit_up,
+        limit_down_df=limit_down,
+        trade_status_df=trade_status,
+        benchmark_ret=pd.Series(0.0, index=adj_close.index),
+        initial_value=100.0,
+    )
+    result = attributor.run(
+        weight_df,
+        benchmark_weight_df,
+        adj_close,
+        actual_weight_df=backtest_result.actual_weights,
+        realized_portfolio_return=backtest_result.daily_ret,
+    )
+
+    assert backtest_result.actual_weights.loc[TRADING_DATES[1]].sum() == 0.0
+    assert backtest_result.actual_weights.loc[execution_day].sum() > 0.9
+    assert abs(result.daily.loc[execution_day, "execution_effect"]) > 1e-6
+
+    attributed = float((1.0 + result.daily["portfolio_return"]).prod() - 1.0)
+    true_total = float(
+        backtest_result.nav.loc[result.daily.index[-1]]
+        / backtest_result.nav.loc[BASE_DATE]
+        - 1.0
+    )
+    assert attributed == pytest.approx(true_total, abs=1e-12)
+
+    decomposed = (
+        result.daily["explained"]
+        + result.daily["residual"]
+        + result.daily["execution_effect"]
+    )
+    assert decomposed.values == pytest.approx(
+        result.daily["active_return"].values,
+        abs=1e-12,
+    )
+    linked_items = result.summary.drop(index="合计(主动收益)")["累计贡献"].sum()
+    assert linked_items == pytest.approx(
+        result.summary.loc["合计(主动收益)", "累计贡献"],
+        abs=1e-12,
+    )
+
+
+def test_same_day_weight_would_overstate_return(attributor, weight_df, benchmark_weight_df):
+    """反向锁：同日权重口径确实高估，证明上一条断言不是恒真的空断言。"""
+    adj_close = _adj_close()
+    w0 = {"A": 0.6, "B": 0.4}
+    actual = _drifting_actual_weights(adj_close, w0)
+    daily_ret = adj_close.pct_change(fill_method=None)
+
+    same_day, lagged = 1.0, 1.0
+    for d in TRADING_DATES:
+        r = daily_ret.loc[d]
+        same_day *= 1.0 + float((actual.loc[d] * r).sum())
+        prev = actual.index[actual.index.get_loc(d) - 1]
+        lagged *= 1.0 + float((actual.loc[prev] * r).sum())
+
+    assert same_day > lagged, "同日权重必须高估，否则这组测试数据照不出该 bug"

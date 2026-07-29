@@ -4,13 +4,14 @@
 #   参数依据见 docs/method.md（§4 默认参数、§5 风格约束建议）。
 # ============================================================================
 strategy: alpha_max
-index: all                # 全市场选股（回测基准在脚本里设中证全指）
+index: all                # 全市场选股
 
 backtest:
   start_date: "2020-01-01"
   end_date: "2026-05-31"
   rebalance_freq: 10        # 每 10 个交易日换仓一次
   initial_value: 100000000  # 初始资金 1 亿元
+  benchmark: equal_weight   # 回测与归因统一使用全市场等权基准
 
 universe:
   exclude_bj: true          # 剔除北交所
@@ -21,9 +22,11 @@ universe:
 optimizer:
   weight_upper: 0.01            # 单票绝对上限 1%
   industry_upper: 0.20          # 单行业绝对上限 20%
-  min_constituent_ratio: 0.40   # 主流成分股下限 40%（保流动性/容量）
+  min_constituent_ratio: 0.40   # 沪深300∪中证500∪中证1000 权重下限 40%（保流动性/容量）
   diversification_penalty: 0.05 # L2 分散惩罚 γ（未启用 risk_aversion 时才生效）
   risk_aversion: null           # CNE6 因子协方差进目标（真风险项）；置空则退回上面的 L2 惩罚
+  # vol_upper: 0.20             # 年化组合波动率硬上限（20%）。与 risk_aversion 互斥，
+  #                             # 启用后目标函数风险项自动关闭；需提供 CNE6 风险面板
   max_turnover: 0.40            # 双边换手硬上限 40%（≈单边 20%）
   turnover_penalty: 0.01        # 换手软惩罚 λ（轻度）
   # 风格绝对暴露上限（CNE6S 20 风格（CNE6L 为 16 风格），单位 σ）：只收紧关键公共风险，其余给 alpha 留表达空间
@@ -40,7 +43,7 @@ optimizer:
 
 alpha:
   source: file
-  synthetic: true            # 文件本身由未来收益构造；强制终端/目录/HTML 三重水印
+  synthetic: true            # 文件本身由未来收益构造；终端和产物目录显示提醒，HTML 不加水印
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
   path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
   standardize: true          # 优化域内截面 z-score；关掉则 risk_aversion 等系数随因子量纲漂移

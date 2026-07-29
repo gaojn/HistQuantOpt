@@ -15,13 +15,18 @@
 | 风险度量 | 组合分散度 / 因子风险 | 相对基准的主动风险（TE） |
 | 行业约束 | 绝对上限 | 相对基准偏离 ±X% |
 | 风格约束 | 绝对暴露 `style_bound` | 主动暴露 `style_active_bound` |
-| 成分股约束 | 可选下限（默认 40%） | 目标指数成分 ≥ 下限（默认 80%） |
+| 成分股约束 | 主流宽基并集可选下限（默认 40%） | 目标指数成分 ≥ 下限（默认 80%） |
 
 一句话：**量化多头偏绝对约束，指数增强偏相对基准约束。**
 
 > 注：两策略候选池其实**相同**（全市场剔北交所+ST，~5000 只）。指数增强不另限宽基，
 > 而是靠 `min_constituent_ratio`（默认 80%）把目标指数成分权重托起、剩余 ≤20% 配全市场
 > ——属「**泛化指增**」（允许从非成分挖超额）。
+>
+> 量化多头配置 `index: all` 时，「成分股」不是全部候选股票，而是
+> **沪深300 ∪ 中证500 ∪ 中证1000**。`min_constituent_ratio: 0.40` 表示至少 40%
+> 组合权重落在这个主流宽基并集内；若成分掩码错误地全为 True，优化器会直接报错，
+> 防止该约束退化为恒成立的空转风控。
 
 ---
 
@@ -51,6 +56,37 @@ $$
 [`risk/cne6_risk.py`](../hqopt/risk/cne6_risk.py)）。
 L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性与个股特质风险差异。
 
+### 2.1 风险的第三种表达：硬约束（`te_upper` / `vol_upper`）
+
+上表两种形态都是**软惩罚**——用 $\lambda$ 间接换取风险水平，实际 TE 只能事后观测。
+若希望**直接指定**风险水平，改用硬约束形态：
+
+$$
+\max_w \; w^\top\alpha - \lambda_c\textstyle\sum_i c_i|w_i-w_{prev,i}|
+\quad \text{s.t.} \quad \sigma(w) \le \sigma_{\max}
+$$
+
+| 策略 | 配置项 | 约束对象 |
+|---|---|---|
+| 量化多头 | `vol_upper` | 组合年化波动率 $\sqrt{252\,(w^\top XFX^\top w+\delta^\top w^2)}$ |
+| 指数增强 | `te_upper` | 年化跟踪误差，同式但 $w\to a=w-w_{bm}$ |
+
+要点：
+
+- **启用后风险项 $R(w)$ 自动置 0**。风险已被硬约束限定，再叠加软惩罚等于对同一
+  风险重复收费，会把解压到上限以内、失去"直接指定"的语义。因此
+  `te_upper`/`vol_upper` **不可与 `risk_aversion` 同时设置**，同时给出会报错。
+- **单位为年化小数**（`0.05`=5%）。CNE6 的 $F,\delta$ 是**日频方差**（实测 Country
+  对角元 $1.8\times10^{-4}$，隐含日波动 1.34%），内部按 $\times 252$ 换算。
+- **必须传 `risk_snapshot`**，否则报错；不会退回 L2 代理（那是
+  `weight_diff_l2_bound`，约束的是权重偏离而非风险，量纲与含义均不同）。
+- **只支持上限**。下限 $\sigma(w)\ge x$ 是反凸约束，无法在凸优化框架内表达。
+  实践上通常也不需要：关闭惩罚项后目标为线性，在凸可行域上取最大值必落在边界，
+  TE 会自然贴近上限；只有当个股/行业/换手约束先把解卡住时才可能低于预期。
+- 与其他硬约束一样做**求解后校验**，实际 TE 超出容差即判定不可行、拒绝发布。
+- 与 `min_constituent_ratio`、`industry_active_bound`、`max_turnover` 叠加容易
+  不可行；此时失败原因会点名本约束，便于定位。
+
 > **指数增强的基准权重 $w_{bm}$** 默认使用 `official_drift`：取不晚于 T 日的
 > 最近官方月度/调样快照 S，并用后复权收盘价直接漂移
 > $w_i(T)\propto w_i(S)P_i^{adj}(T)/P_i^{adj}(S)$。快照日直接使用官方原值；
@@ -71,7 +107,7 @@ L2 形态无需协方差、简单稳健；CNE6 形态刻画真实因子相关性
 | 1 | 预算 | $\sum w_i = 1$ | 同 |
 | 2 | 个股区间 | $0\le w_i\le W_{\max}$ | 同 |
 | 2b | 单票主动偏离（可选） | — | $\lvert w_i - w_{bm,i}\rvert \le \delta$ |
-| 3 | 成分股下限 | $\sum_{i\in C} w_i \ge R_{\min}$（可选） | $\sum_{i\in C_{\text{index}}} w_i \ge R_{\min}$ |
+| 3 | 成分股下限 | $\sum_{i\in C_{\text{main}}} w_i \ge R_{\min}$（可选；$C_{\text{main}}=$沪深300∪中证500∪中证1000） | $\sum_{i\in C_{\text{index}}} w_i \ge R_{\min}$ |
 | 4 | 行业 | $\sum_{i\in k} w_i \le I_{\max}$ | $\lvert\sum_{i\in k}(w_i-w_{bm,i})\rvert \le I_{\text{act}}$ |
 | 5 | 风格 | $\lvert B_k^\top w\rvert \le S_{\max,k}$ | $\lvert B_k^\top(w-w_{bm})\rvert \le S_{\text{act},k}$ |
 | 6 | 换手（硬上限，可选） | $\lVert w-w_{\text{prev}}\rVert_1 \le T_{\max}+c$，$c=\max(0,1-\sum w_{prev})$ | 同 |
@@ -130,7 +166,7 @@ alpha 置零范围：frozen ∪ zero ∪ sell_only（避免干扰目标函数方
 |---|---:|---:|---|
 | `weight_upper` | 0.01 | 0.01 | 单票绝对上限，两策略目前一致 |
 | `active_weight_upper` | — | 0.01 | 指增专属：单票主动偏离硬上限 ±1%，`null`=不约束 |
-| `min_constituent_ratio` | 0.40 | 0.80 | 指增须大部分留在目标指数内 |
+| `min_constituent_ratio` | 0.40 | 0.80 | 量化多头约束主流宽基并集；指增约束目标指数 |
 | 行业 | `industry_upper: 0.20` | `industry_active_bound: 0.05` | 绝对集中度 vs 相对偏离 |
 | 风格默认上限 | `style_bound.default: 0.50` | `style_active_bound.default: 0.60` | 指增更怕风格漂移 |
 | `Size` / `Beta` | 0.20 / 0.20 | 0.20 / 0.20 | 控市值、市场暴露 |
@@ -240,6 +276,12 @@ PENDING_BUY / FILLED / EXPIRED`：
 目标权重，不凭空推断制度性只卖限制；一旦存在任一配套文件或标记，就按 bundle
 处理并要求契约完整有效。
 
+独立 `hqopt backtest` / `hqopt attribute` 也会生成项目级 RunManifest：以 CLI
+有效参数哈希代替来源 YAML，输入侧绑定权重及已存在的 sell-only、批量执行统计和
+bundle manifest，输出侧绑定报告、明细与执行统计。成功和失败运行都保留唯一清单；
+无配置绑定的数据锁时显式记录 `verified=false/not_verified`，不能解读为数据锁通过。
+直接调用 Python API 且 `out_dir=None` 时仍是纯内存路径，不产生清单。
+
 执行优先级为：**股数冻结 / 已成交锁定 > pending 股票逼近目标 > 全组合精确目标**。
 
 **`RealisticBacktester.run` 的内部分工**（`backtest/engine.py`）：
@@ -248,7 +290,7 @@ PENDING_BUY / FILLED / EXPIRED`：
 |---|---|
 | `_normalize_weight_inputs` | 统一权重索引为 Timestamp、绑定 sell-only 矩阵、校验调仓日在交易日历内 |
 | `_align_market_frames` | 各行情宽表裁剪对齐到「首个调仓日起」，产出只读 `_MarketFrames` |
-| `_replay_days` | 逐日：撤旧目标 → 当日成交 → 估值 → 收盘提交新目标，产出 `_ReplayRecords` |
+| `_replay_days` | 逐日：执行旧目标 → 估值 → 收盘提交并覆盖新目标，产出 `_ReplayRecords` |
 | `_resolve_benchmark_returns` | 对齐基准日收益（含首日置零，见下方口径说明） |
 | `_stale_holding_value` | 末日靠 ffill 陈旧价估值的滞留持仓数与市值 |
 | `_build_exec_stats` | 汇总可审计的执行统计 JSON |
@@ -311,8 +353,8 @@ PENDING_BUY / FILLED / EXPIRED`：
 阶段一为何不能移出该模块，见 [design.md §6.1](design.md)。
 
 账本推进的游标状态收敛在 `_ExecutionWalker`：`open_signal_day` 补齐调仓日之前的
-成交、信号日只估值；未发布新目标的调仓日由 `replay_signal_day` 恢复旧目标的当日
-尝试；`finish` 在区间末尾补记最后一批 T+1/T+2/T+3 成交或过期。
+成交，并在信号日先执行旧目标；成功的新目标于收盘后覆盖剩余订单，未发布新目标时
+旧目标继续保留；`finish` 在区间末尾补记最后一批 T+1/T+2/T+3 成交或过期。
 
 单期直接调优化器：
 
@@ -395,13 +437,20 @@ $w_{p,t}$。主动权重 $w_{active,t}=w_{p,t}-w_{bm}$ 与主动暴露
 $X_{active,t}=X^\top w_{active,t}$ 因实际成交和价格漂移逐日更新：
 
 $$
-\text{主动收益}(t) \approx \underbrace{X_{active,t}^\top f(t)}_{\text{风格+行业+Country}} + \underbrace{w_{active,t}^\top u(t)}_{\text{选股（特质）}}
+\text{真实主动收益}(t)
+= \underbrace{X_{active,t}^\top f(t)}_{\text{风格+行业+Country}}
++ \underbrace{w_{active,t}^\top u(t)}_{\text{选股（特质）}}
++ \text{模型残差}(t)
++ \text{执行影响}(t)
 $$
 
 $f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse
 `test_barra_cne6_gao.factor_return_S/L` / `specific_return_S/L`，与暴露 $X$
 （`test_barra_cne6_gao.factor_exposure`）**同源且同模型**，保证残差
-自检有意义。多期先把每日算术贡献 $c_{j,t}$ 转为相对贡献
+自检有意义。`portfolio_return` 直接采用成交账本的真实日收益；昨收实际权重乘
+收盘到收盘收益只作为 `holding_portfolio_return`。两者之差
+`execution_effect` 单列 VWAP→收盘时点差、费用和滑点，因而归因净值与回测 NAV
+严格一致。多期先把每日算术贡献 $c_{j,t}$ 转为相对贡献
 $\tilde c_{j,t}=c_{j,t}/(1+R_{b,t})$，其和等于
 $g_t=(1+R_{p,t})/(1+R_{b,t})-1$，再用 Carino(1999) 平滑系数链接。因此严格满足：
 
@@ -412,20 +461,21 @@ $$
 
 这里不再使用 $\prod_t(1+R_{p,t}-R_{b,t})-1$ 的近似口径。
 
-**残差自检**：每日「主动收益 − (风格+行业+Country+特质)」理论上应 ≈0；非零
-主要来自**覆盖缺口**——`test_barra_cne6_gao` 只覆盖其估计域（`univ_flag==1`，剔除次新/
-极小市值等），组合或基准里在域外的持仓收益全部漏进残差。`daily["coverage_pct"]`
-给出每期"被模型覆盖的主动权重占比"可供判断，但覆盖率与残差占比非线性关系
+**残差自检**：每日「持有主动收益 − (风格+行业+Country+特质)」理论上应 ≈0；
+非零主要来自**覆盖缺口**——`test_barra_cne6_gao` 只覆盖其估计域
+（`univ_flag==1`，剔除次新/极小市值等），组合或基准里在域外的持仓收益全部漏进
+模型残差。执行影响与模型残差分列，不能把交易费用误判成选股或模型误差。
+`daily["coverage_pct"]` 给出每期"被模型覆盖的主动权重占比"可供判断，但覆盖率与
+残差占比非线性关系
 （未覆盖的常是高波动票，权重小也可能贡献不成比例的残差）。**残差占比高的
 期间，归因结论需谨慎**；合成数据（完全覆盖）下残差严格为 0，证明分解算式
 本身正确，见 `tests/test_attribution.py`。
 
 **已知局限**：风险模型暴露快照仍按持有期冻结，调仓越不频繁，暴露与
-`f(t)/u(t)` 实际估计所用的当日暴露之间的近似误差可能越大；成交发生在日内 VWAP，
-而因子收益是收盘到收盘口径，因此成交日仍可能出现时点残差；`t统计` 为简单
-`mean/std` 未做自相关调整（非 NW 稳健标准误）。此外，独立回测或归因若从调仓周期
-中途裁剪权重并以全现金启动，无法还原此前的股数和订单状态。当前接口尚不支持载入
-完整成交 checkpoint，因此精确重放必须从策略起点开始。
+`f(t)/u(t)` 实际估计所用的当日暴露之间的近似误差可能越大；`t统计` 为简单
+`mean/std` 未做自相关调整（非 NW 稳健标准误）。此外，独立回测或归因若从调仓
+周期中途裁剪权重并以全现金启动，无法还原此前的股数和订单状态。当前接口尚不支持
+载入完整成交 checkpoint，因此精确重放必须从策略起点开始。
 
 ---
 

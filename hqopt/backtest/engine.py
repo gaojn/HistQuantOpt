@@ -263,7 +263,7 @@ def _replay_days(
     sell_only_df: pd.DataFrame | None,
     rebal_date_set: set,
 ) -> _ReplayRecords:
-    """逐日推进成交账本：撤旧目标 → 当日成交 → 估值 → 收盘提交新目标。"""
+    """逐日推进成交账本：执行旧目标 → 估值 → 收盘提交并覆盖新目标。"""
     records = _ReplayRecords(
         port_values=pd.Series(0.0, index=frames.dates),
         turnover={},
@@ -272,11 +272,8 @@ def _replay_days(
     )
 
     for day in frames.dates:
-        # 新调仓目标覆盖旧目标：调仓日开盘前直接撤销上一目标的残余订单，
-        # 当日 step 仅更新估值；新目标在收盘后提交，最早于下一交易日执行。
-        if day in rebal_date_set:
-            ledger.cancel_pending_target()
-
+        # 当日盘中先执行上一交易日收盘后仍有效的目标。若当日收盘产生新目标，
+        # submit_target 会在成交与估值完成后覆盖旧目标的剩余订单。
         day_result = ledger.step(
             adj_close=frames.adj_close_raw.loc[day],
             adj_vwap=frames.adj_vwap.loc[day],
