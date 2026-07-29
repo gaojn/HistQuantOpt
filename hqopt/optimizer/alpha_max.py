@@ -39,9 +39,13 @@ from hqopt.data.generator import MarketSnapshot
 from hqopt.optimizer._common import (
     BasePortfolioResult,
     build_trading_masks,
+    common_constraint_violations,
     finalize_weights,
     industry_matrix_for,
+    max_positive_violation,
     neutralize_alpha,
+    post_solve_failure_reason,
+    post_solve_failures,
     resolve_style_bounds,
     solve_with_fallback,
     state_constraints,
@@ -238,12 +242,48 @@ class AlphaMaxOptimizer:
         if prob.status not in ("optimal", "optimal_inaccurate"):
             return AlphaMaxResult.infeasible(tickers, prob.status)
 
+        weights = finalize_weights(np.array(w.value, dtype=float), masks)
+        violations = common_constraint_violations(
+            weights,
+            masks,
+            weight_upper=cfg.weight_upper,
+            max_turnover=cfg.max_turnover,
+        )
+        violations["industry_upper"] = max_positive_violation(
+            G_ind @ weights - cfg.industry_upper
+        )
+        if (
+            cfg.min_constituent_ratio > 0
+            and snapshot.is_constituent is not None
+        ):
+            post_const_idx = np.where(snapshot.constituent_mask)[0]
+            if len(post_const_idx) > 0:
+                violations["constituent_minimum"] = max_positive_violation(
+                    cfg.min_constituent_ratio - weights[post_const_idx].sum()
+                )
+        if style_loading is not None and cfg.style_bound is not None:
+            post_style = style_loading.reindex(tickers).fillna(0.0).values
+            post_bound = resolve_style_bounds(
+                cfg.style_bound, style_loading.columns
+            )
+            violations["style_absolute"] = max_positive_violation(
+                np.abs(post_style.T @ weights) - post_bound
+            )
+        failures = post_solve_failures(violations)
+        if failures:
+            return AlphaMaxResult.infeasible(
+                tickers,
+                post_solve_failure_reason(failures),
+                constraint_violations=violations,
+            )
+
         return AlphaMaxResult(
             tickers=tickers,
-            weights=finalize_weights(np.array(w.value, dtype=float), masks),
+            weights=weights,
             status=prob.status,
             objective_value=float(prob.value),
             snapshot=snapshot,
+            constraint_violations=violations,
         )
 
 

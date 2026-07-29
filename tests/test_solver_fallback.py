@@ -183,3 +183,56 @@ def test_ie_infeasible_result_has_no_benchmark(monkeypatch, snap):
     assert res.industry_active_weights().empty
     style = pd.DataFrame(0.0, index=snap.tickers, columns=["Size"])
     assert res.style_active_exposure(style).empty
+
+# ── 求解后硬约束门禁 ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", ["index_enhance", "alpha_max"])
+def test_post_solve_rejects_cleanup_that_breaks_budget(monkeypatch, snap, kind):
+    """即使原始求解成功，清理后的权重破坏预算也必须拒绝发布。"""
+    module = f"hqopt.optimizer.{kind}"
+    monkeypatch.setattr(
+        f"{module}.finalize_weights",
+        lambda raw, masks: np.zeros_like(raw),
+    )
+
+    result = _optimize(kind, snap)
+
+    assert not result.is_feasible
+    assert "post-solve constraint violation" in result.status
+    assert result.constraint_violations["budget"] == pytest.approx(1.0)
+    assert np.array_equal(result.weights, np.zeros(snap.n_stocks))
+
+
+@pytest.mark.parametrize("kind", ["index_enhance", "alpha_max"])
+def test_optimal_inaccurate_is_not_trusted_without_postcheck(
+    monkeypatch, snap, kind
+):
+    """optimal_inaccurate 只表示求解器状态；违规半成品仍必须被门禁拦截。"""
+    module = f"hqopt.optimizer.{kind}"
+
+    def fake_inaccurate(problem):
+        variable = problem.variables()[0]
+        variable.value = np.zeros(variable.shape)
+        problem._status = "optimal_inaccurate"
+        return None
+
+    monkeypatch.setattr(f"{module}.solve_with_fallback", fake_inaccurate)
+
+    result = _optimize(kind, snap)
+
+    assert not result.is_feasible
+    assert "post-solve constraint violation" in result.status
+    assert result.constraint_violations["budget"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("kind", ["index_enhance", "alpha_max"])
+def test_scs_fallback_must_also_pass_postcheck(monkeypatch, snap, kind):
+    """CLARABEL 异常后采用 SCS；仅在全部硬约束残差过门时才可发布。"""
+    calls = _spy_solver(monkeypatch, raise_on=(cp.CLARABEL,))
+
+    result = _optimize(kind, snap)
+
+    assert calls == [cp.CLARABEL, cp.SCS]
+    assert result.is_feasible
+    assert max(result.constraint_violations.values()) <= _common.POST_SOLVE_ABS_TOL

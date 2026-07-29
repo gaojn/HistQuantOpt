@@ -30,6 +30,7 @@ from hqopt.data.benchmark import (
 )
 from hqopt.data.real_adapter import RealMarketAdapter
 from hqopt.io.data_panel import load_panel
+from hqopt.optimizer._common import POST_SOLVE_ABS_TOL
 from hqopt.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from hqopt.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
 from hqopt.pipeline.universe import (
@@ -266,6 +267,12 @@ class _RunStats:
     alpha_max_staleness: int = 0
     alpha_as_of_by_period: dict[str, str] = field(default_factory=dict)
     alpha_staleness_days_by_period: dict[str, int] = field(default_factory=dict)
+    postcheck_failure_count: int = 0
+    postcheck_max_violation: float = 0.0
+    postcheck_max_violation_by_period: dict[str, float] = field(default_factory=dict)
+    postcheck_failures_by_period: dict[str, dict[str, float]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -960,8 +967,27 @@ def _run_periods(inputs: _BatchInputs) -> _PeriodOutcome:
 
         elapsed = time.time() - t0
         outcome.stats.solve_times.append(elapsed)
+        violations = getattr(result, "constraint_violations", {})
+        if violations:
+            max_violation = max(float(value) for value in violations.values())
+            period_key = rebal_date.isoformat()
+            outcome.stats.postcheck_max_violation = max(
+                outcome.stats.postcheck_max_violation, max_violation
+            )
+            outcome.stats.postcheck_max_violation_by_period[period_key] = (
+                max_violation
+            )
         if not result.is_feasible:
             outcome.stats.fail_count += 1
+            if "post-solve constraint violation" in result.status:
+                outcome.stats.postcheck_failure_count += 1
+                outcome.stats.postcheck_failures_by_period[
+                    rebal_date.isoformat()
+                ] = {
+                    name: float(value)
+                    for name, value in violations.items()
+                    if not np.isfinite(value) or value > POST_SOLVE_ABS_TOL
+                }
             logger.info(f"  [{rebal_date}] ✗ 求解失败：{result.status}")
             # 未发布新目标时恢复旧目标在当日的正常执行，与重放权重日期保持一致。
             walker.replay_signal_day(signal_day)
@@ -1048,6 +1074,15 @@ def _publish_outputs(inputs: _BatchInputs, outcome: _PeriodOutcome) -> pd.DataFr
             "candidate_period_count": len(inputs.rebal_dates),
             "successful_period_count": len(outcome.weight_records),
             "failed_period_count": outcome.stats.fail_count,
+            "post_solve_validation": {
+                "absolute_tolerance": POST_SOLVE_ABS_TOL,
+                "failure_count": outcome.stats.postcheck_failure_count,
+                "max_observed_violation": outcome.stats.postcheck_max_violation,
+                "max_violation_by_period": (
+                    outcome.stats.postcheck_max_violation_by_period
+                ),
+                "failures_by_period": outcome.stats.postcheck_failures_by_period,
+            },
         },
         "benchmark_quality": (
             inputs.benchmark.audit_summary()

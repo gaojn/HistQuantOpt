@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import cvxpy as cp
@@ -27,6 +27,8 @@ UNBOUNDED = 1e6
 _CLARABEL_MAX_ITER = 500
 _SCS_MAX_ITERS = 10000
 _OPTIMAL_STATUSES = ("optimal", "optimal_inaccurate")
+# 求解后硬约束绝对容差。1e-5 权重对应 0.001 个百分点；超过即拒绝发布。
+POST_SOLVE_ABS_TOL = 1e-5
 
 
 def resolve_style_bounds(
@@ -160,6 +162,80 @@ def weight_upper_vector(masks: TradingMasks, weight_upper: float) -> np.ndarray:
     return upper
 
 
+def max_positive_violation(values: Any) -> float:
+    """返回 ``max(values, 0)``；空数组为 0，非有限值为 inf。"""
+    array = np.asarray(values, dtype=float)
+    if array.size == 0:
+        return 0.0
+    if not np.isfinite(array).all():
+        return float("inf")
+    return max(0.0, float(array.max()))
+
+
+def common_constraint_violations(
+    weights: np.ndarray,
+    masks: TradingMasks,
+    *,
+    weight_upper: float,
+    max_turnover: float | None,
+) -> dict[str, float]:
+    """计算两个优化器共有硬约束的非负超限量。"""
+    values = np.asarray(weights, dtype=float)
+    if values.shape != masks.prev_weight.shape:
+        return {"shape": float("inf")}
+    if not np.isfinite(values).all():
+        return {"finite": float("inf")}
+
+    violations = {
+        "budget": abs(float(values.sum()) - 1.0),
+        "long_only": max_positive_violation(-values),
+        "weight_upper": max_positive_violation(
+            values - weight_upper_vector(masks, weight_upper)
+        ),
+        "frozen": max_positive_violation(
+            np.abs(values[masks.frozen] - masks.prev_weight[masks.frozen])
+        ),
+        "forced_zero": max_positive_violation(np.abs(values[masks.zero])),
+        "sell_only": max_positive_violation(
+            values[masks.sell_only] - masks.prev_weight[masks.sell_only]
+        ),
+    }
+    if masks.has_prev and max_turnover is not None:
+        cash_gap = max(0.0, 1.0 - float(masks.prev_weight.sum()))
+        violations["turnover"] = max_positive_violation(
+            np.abs(values - masks.prev_weight).sum()
+            - (max_turnover + cash_gap)
+        )
+    return violations
+
+
+def post_solve_failures(
+    violations: dict[str, float],
+    *,
+    tolerance: float = POST_SOLVE_ABS_TOL,
+) -> dict[str, float]:
+    """筛出超过发布容差的硬约束残差。"""
+    return {
+        name: float(value)
+        for name, value in violations.items()
+        if not np.isfinite(value) or value > tolerance
+    }
+
+
+def post_solve_failure_reason(failures: dict[str, float]) -> str:
+    """生成稳定、可审计的求解后门禁失败原因。"""
+    details = ", ".join(
+        f"{name}={value:.3e}"
+        for name, value in sorted(
+            failures.items(), key=lambda item: (-item[1], item[0])
+        )
+    )
+    return (
+        f"post-solve constraint violation (tol={POST_SOLVE_ABS_TOL:.1e}): "
+        f"{details}"
+    )
+
+
 def state_constraints(w: cp.Variable, masks: TradingMasks) -> list:
     """三类交易状态的硬约束（向量化）。"""
     constraints = []
@@ -248,15 +324,23 @@ class BasePortfolioResult:
     status: str
     objective_value: float
     snapshot: MarketSnapshot | None
+    constraint_violations: dict[str, float] = field(default_factory=dict)
 
     @classmethod
-    def infeasible(cls, tickers: list[str], reason: str):
+    def infeasible(
+        cls,
+        tickers: list[str],
+        reason: str,
+        *,
+        constraint_violations: dict[str, float] | None = None,
+    ):
         return cls(
             tickers=tickers,
             weights=np.zeros(len(tickers)),
             status=f"infeasible: {reason}",
             objective_value=float("nan"),
             snapshot=None,
+            constraint_violations=constraint_violations or {},
         )
 
     @property

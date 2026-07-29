@@ -42,9 +42,13 @@ from hqopt.data.generator import MarketSnapshot
 from hqopt.optimizer._common import (
     BasePortfolioResult,
     build_trading_masks,
+    common_constraint_violations,
     finalize_weights,
     industry_matrix_for,
+    max_positive_violation,
     neutralize_alpha,
+    post_solve_failure_reason,
+    post_solve_failures,
     resolve_style_bounds,
     solve_with_fallback,
     state_constraints,
@@ -234,12 +238,62 @@ class IndexEnhanceOptimizer:
         if prob.status not in ("optimal", "optimal_inaccurate"):
             return IndexEnhanceResult.infeasible(tickers, prob.status)
 
+        weights = finalize_weights(np.array(w.value, dtype=float), masks)
+        violations = common_constraint_violations(
+            weights,
+            masks,
+            weight_upper=cfg.weight_upper,
+            max_turnover=cfg.max_turnover,
+        )
+        if cfg.active_weight_upper is not None:
+            non_frozen_idx = np.where(~masks.frozen)[0]
+            violations["active_weight_upper_positive"] = max_positive_violation(
+                weights[non_frozen_idx]
+                - w_bm[non_frozen_idx]
+                - cfg.active_weight_upper
+            )
+            lower_active_idx = np.where(~masks.restricted)[0]
+            violations["active_weight_upper_negative"] = max_positive_violation(
+                w_bm[lower_active_idx]
+                - weights[lower_active_idx]
+                - cfg.active_weight_upper
+            )
+        if snapshot.is_constituent is not None and cfg.min_constituent_ratio > 0:
+            post_const_idx = np.where(snapshot.constituent_mask)[0]
+            if len(post_const_idx) > 0:
+                violations["constituent_minimum"] = max_positive_violation(
+                    cfg.min_constituent_ratio - weights[post_const_idx].sum()
+                )
+        violations["industry_active"] = max_positive_violation(
+            np.abs(G_ind @ weights - bm_ind) - cfg.industry_active_bound
+        )
+        if style_loading is not None:
+            post_style = style_loading.reindex(tickers).fillna(0.0).values
+            post_bound = resolve_style_bounds(
+                cfg.style_active_bound, style_loading.columns
+            )
+            violations["style_active"] = max_positive_violation(
+                np.abs(post_style.T @ (weights - w_bm)) - post_bound
+            )
+        if cfg.weight_diff_l2_bound is not None:
+            violations["weight_diff_l2"] = max_positive_violation(
+                np.linalg.norm(weights - w_bm) - cfg.weight_diff_l2_bound
+            )
+        failures = post_solve_failures(violations)
+        if failures:
+            return IndexEnhanceResult.infeasible(
+                tickers,
+                post_solve_failure_reason(failures),
+                constraint_violations=violations,
+            )
+
         return IndexEnhanceResult(
             tickers=tickers,
-            weights=finalize_weights(np.array(w.value, dtype=float), masks),
+            weights=weights,
             status=prob.status,
             objective_value=float(prob.value),
             snapshot=snapshot,
+            constraint_violations=violations,
             benchmark_weight=w_bm,
         )
 

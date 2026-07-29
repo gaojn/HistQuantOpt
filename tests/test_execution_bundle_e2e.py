@@ -281,6 +281,13 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
         "candidate_period_count": 6,
         "failed_period_count": 4,
         "successful_period_count": 2,
+        "post_solve_validation": {
+            "absolute_tolerance": 1e-5,
+            "failure_count": 0,
+            "failures_by_period": {},
+            "max_observed_violation": 0.0,
+            "max_violation_by_period": {},
+        },
     }
     assert batch_stats["alpha_quality"]["skipped_period_count"] == 0
     assert batch_stats["alpha_quality"]["zero_variance_period_count"] == 0

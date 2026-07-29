@@ -801,6 +801,13 @@ def test_zero_variance_alpha_skips_only_affected_period(
         "candidate_period_count": 2,
         "failed_period_count": 1,
         "successful_period_count": 1,
+        "post_solve_validation": {
+            "absolute_tolerance": 1e-5,
+            "failure_count": 0,
+            "failures_by_period": {},
+            "max_observed_violation": 0.0,
+            "max_violation_by_period": {},
+        },
     }
     assert stats["alpha_quality"]["skipped_period_count"] == 1
     assert stats["alpha_quality"]["zero_variance_period_count"] == 1
