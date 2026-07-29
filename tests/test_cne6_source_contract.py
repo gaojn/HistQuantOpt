@@ -6,12 +6,15 @@ from datetime import date
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 import scripts.export_cne6_panels as exporter
+import scripts.export_factor_attribution as attribution_exporter
 from hqopt.risk.cne6_risk import (
     STYLE_FACTORS,
     STYLE_FACTORS_L,
     STYLE_FACTORS_S,
+    CNE6RiskModel,
 )
 from scripts.verify_data_bundle import load_manifest
 
@@ -106,3 +109,157 @@ def test_covariance_filters_empty_industry_on_both_axes(monkeypatch) -> None:
         [1.0, 0.2],
     ]
     assert "" not in panel["factor"].to_list()
+
+
+def _write_risk_contract(data_dir: Path, factors: list[str]) -> None:
+    data_dir.mkdir()
+    rdate = date(2024, 1, 2)
+    cov_data: dict[str, list[object]] = {
+        "rebal_date": [rdate] * len(factors),
+        "factor": factors,
+    }
+    for column_index, factor in enumerate(factors):
+        cov_data[factor] = [
+            1.0 if row_index == column_index else 0.0
+            for row_index in range(len(factors))
+        ]
+    pl.DataFrame(cov_data).write_parquet(data_dir / "factor_cov_panel.parquet")
+
+    exposure_data: dict[str, list[object]] = {
+        "rebal_date": [rdate],
+        "code": ["A"],
+        "spec_var": [0.1],
+    }
+    exposure_data.update({factor: [0.0] for factor in factors})
+    pl.DataFrame(exposure_data).write_parquet(data_dir / "exposure_panel.parquet")
+
+
+def _contract_factors(styles: tuple[str, ...]) -> list[str]:
+    return [*styles, "Country", *(f"Industry{i:02d}" for i in range(30))]
+
+
+def test_default_s_directory_rejects_l_factor_contract(tmp_path) -> None:
+    data_dir = tmp_path / "barra_cne6_S"
+    _write_risk_contract(data_dir, _contract_factors(STYLE_FACTORS_L))
+
+    with pytest.raises(ValueError, match="CNE6S 因子合同失败"):
+        CNE6RiskModel(data_dir=data_dir, query_dates=[])
+
+
+@pytest.mark.parametrize(
+    ("directory", "styles", "variant"),
+    [
+        ("barra_cne6_S", STYLE_FACTORS_S, "S"),
+        ("barra_cne6_L", STYLE_FACTORS_L, "L"),
+        # 改名前的 S 目录旧名，仍须被识别为 S 并执行合同校验（不得静默跳过）
+        ("barra_cne6", STYLE_FACTORS_S, "S"),
+    ],
+)
+def test_s_and_l_directories_accept_exact_contracts(
+    tmp_path,
+    directory,
+    styles,
+    variant,
+) -> None:
+    data_dir = tmp_path / directory
+    _write_risk_contract(data_dir, _contract_factors(styles))
+
+    model = CNE6RiskModel(data_dir=data_dir, query_dates=[])
+
+    assert model.variant == variant
+
+
+def test_exposure_source_validation_fails_closed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        exporter,
+        "query_df",
+        lambda _sql: pl.DataFrame(
+            {
+                "groups": [10],
+                "min_factor_count": [19],
+                "max_factor_count": [20],
+                "min_row_count": [19],
+                "max_row_count": [21],
+                "bad_groups": [1],
+                "invalid_values": [0],
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="factor_exposure 内容合同失败"):
+        exporter.validate_exposure_source()
+
+
+def test_covariance_rejects_incomplete_triangle(monkeypatch) -> None:
+    monkeypatch.setattr(
+        exporter,
+        "query_df",
+        lambda _sql: pl.DataFrame(
+            {
+                "trade_date": [date(2024, 1, 2)] * 2,
+                "factor_i": ["Size", "Size"],
+                "factor_j": ["Size", "Country"],
+                "cov": [1.0, 0.2],
+            }
+        ),
+    )
+
+    with pytest.raises(ValueError, match="非完整三角矩阵"):
+        exporter.load_factor_cov("L", ["Size", "Country"])
+
+
+def _factor_return_frame(factors: list[str]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "trade_date": [date(2024, 1, 2)] * len(factors),
+            "factor_name": factors,
+            "ret": [0.0] * len(factors),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("variant", "styles"),
+    [("S", STYLE_FACTORS_S), ("L", STYLE_FACTORS_L)],
+)
+def test_factor_return_accepts_exact_s_and_l_contracts(variant, styles) -> None:
+    attribution_exporter._validate_factor_return(
+        _factor_return_frame(_contract_factors(styles)),
+        variant,
+    )
+
+
+def test_factor_return_rejects_l_factors_in_s_table() -> None:
+    with pytest.raises(ValueError, match="CNE6S factor_return 因子合同失败"):
+        attribution_exporter._validate_factor_return(
+            _factor_return_frame(_contract_factors(STYLE_FACTORS_L)),
+            "S",
+        )
+
+
+def test_factor_return_allows_industry_without_constituents_for_one_day() -> None:
+    factors = _contract_factors(STYLE_FACTORS_S)
+    full_day = _factor_return_frame(factors)
+    missing_industry_day = pl.DataFrame(
+        {
+            "trade_date": [date(2024, 1, 3)] * (len(factors) - 1),
+            "factor_name": factors[:-1],
+            "ret": [0.0] * (len(factors) - 1),
+        }
+    )
+
+    attribution_exporter._validate_factor_return(
+        pl.concat([full_day, missing_industry_day]),
+        "S",
+    )
+
+
+def test_exposure_quarter_ranges_cover_interval_without_overlap() -> None:
+    assert exporter._quarter_ranges(
+        date(2024, 2, 15),
+        date(2024, 8, 2),
+    ) == [
+        (date(2024, 2, 15), date(2024, 4, 30)),
+        (date(2024, 5, 1), date(2024, 7, 31)),
+        (date(2024, 8, 1), date(2024, 8, 2)),
+    ]

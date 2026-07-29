@@ -185,7 +185,7 @@ def run_attribution(
         bm_matrix = _equal_weight_benchmark(adj_close)
 
     # ── 4. CNE6 风险模型 + 因子收益 ──────────────────────────
-    tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6(默认/短周期S)"
+    tag = Path(cne6_data_dir).name if cne6_data_dir else "barra_cne6_S(默认/短周期S)"
     logger.info(
         f"\n[4] 加载 CNE6 风险模型[{tag}] / "
         "因子收益(test_barra_cne6_gao，同目录同模型)..."

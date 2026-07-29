@@ -1,7 +1,7 @@
 """CNE6 因子风险模型加载器。
 
 消费 BarraCNE6 产出的逐日（防前视）风险面板：
-    data/barra_cne6/exposure_panel.parquet   —— CNE6S：20 风格 + Country + 30 行业
+    data/barra_cne6_S/exposure_panel.parquet   —— CNE6S：20 风格 + Country + 30 行业
     data/barra_cne6_L/exposure_panel.parquet —— CNE6L：16 风格 + Country + 30 行业
     各目录 factor_cov_panel.parquet          —— 与暴露同维的因子协方差 F
 
@@ -49,8 +49,9 @@ STYLE_FACTORS_S: tuple[str, ...] = (
     "AnalystSentiment", "IndustryMomentum", "Seasonality", "ShortTermReversal",
 )
 STYLE_FACTORS: tuple[str, ...] = STYLE_FACTORS_S
+EXPECTED_FACTOR_COUNTS = {"S": 51, "L": 47}
 
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "barra_cne6"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "barra_cne6_S"
 
 # 单期 pandas 暴露截面的 LRU 上限（每期约数十 MB，不设上限会在长回测里
 # 把整个面板再以 pandas 形式复制一份）。
@@ -84,8 +85,49 @@ class RiskSnapshot:
         )
 
 
+def _infer_variant(data_dir: Path, *, used_default: bool) -> str | None:
+    # "barra_cne6" 是 2026-07-29 改名前的 S 目录旧名，保留为别名：变体识别失败会
+    # 让 _validate_factor_contract 直接跳过校验（静默失效），比认下旧名更危险。
+    if used_default or data_dir.name in ("barra_cne6_S", "barra_cne6"):
+        return "S"
+    if data_dir.name == "barra_cne6_L":
+        return "L"
+    return None
+
+
+def _validate_factor_contract(factor_names: list[str], variant: str | None) -> None:
+    """默认 S/L 目录必须严格符合各自因子合同；自定义测试目录保持兼容。"""
+    if variant is None:
+        return
+    expected_styles = STYLE_FACTORS_S if variant == "S" else STYLE_FACTORS_L
+    missing_styles = sorted(set(expected_styles) - set(factor_names))
+    forbidden_fast = (
+        sorted((set(STYLE_FACTORS_S) - set(STYLE_FACTORS_L)) & set(factor_names))
+        if variant == "L"
+        else []
+    )
+    expected_count = EXPECTED_FACTOR_COUNTS[variant]
+    non_styles = set(factor_names) - set(expected_styles)
+    if (
+        missing_styles
+        or forbidden_fast
+        or "Country" not in factor_names
+        or "" in factor_names
+        or len(factor_names) != expected_count
+        or len(non_styles) != 31
+    ):
+        raise ValueError(
+            f"CNE6{variant} 因子合同失败：实际={len(factor_names)} "
+            f"期望={expected_count}，缺风格={missing_styles}，"
+            f"L 禁止快因子={forbidden_fast}，非风格数={len(non_styles)}"
+        )
+
+
 @lru_cache(maxsize=4)
-def _load_cov_panel(data_dir: str) -> tuple[dict, list[date]]:
+def _load_cov_panel(
+    data_dir: str,
+    variant: str | None,
+) -> tuple[dict, list[date]]:
     """加载因子协方差面板（~16MB，整表常驻），按 data_dir 缓存。
 
     暴露面板另行按需加载——它可达 ~1GB，整表常驻会吃掉数 GB 内存。
@@ -99,11 +141,16 @@ def _load_cov_panel(data_dir: str) -> tuple[dict, list[date]]:
     )
 
     factor_names = [c for c in cov.columns if c not in ("rebal_date", "factor")]
+    _validate_factor_contract(factor_names, variant)
     cov_by_date: dict[date, tuple[list[str], np.ndarray]] = {}
     for rdate, sub in cov.group_by("rebal_date"):
         rdate = rdate[0] if isinstance(rdate, tuple) else rdate
         order = sub["factor"].to_list()
+        if len(order) != len(factor_names) or set(order) != set(factor_names):
+            raise ValueError(f"CNE6{variant or ''} {rdate} 协方差行列不完整")
         mat = sub.select(order).to_numpy().astype(np.float64)
+        if not np.isfinite(mat).all():
+            raise ValueError(f"CNE6{variant or ''} {rdate} 协方差含 NaN/Inf")
         # 对齐到统一 factor_names 顺序
         pos = [order.index(f) for f in factor_names]
         F = mat[np.ix_(pos, pos)]
@@ -145,7 +192,7 @@ class CNE6RiskModel:
     Parameters
     ----------
     data_dir : str | Path | None
-        风险面板目录，None 用默认短周期 CNE6S（``data/barra_cne6/``）。
+        风险面板目录，None 用默认短周期 CNE6S（``data/barra_cne6_S/``）。
     query_dates : Iterable[date] | None
         将要查询的调仓日。**强烈建议传入**：只有这些日期 as-of 命中的
         暴露截面会被读入并预先分区，实测 155 期回测下峰值内存由 ~2.7GB
@@ -158,8 +205,21 @@ class CNE6RiskModel:
         data_dir: str | Path | None = None,
         query_dates: Iterable[date] | None = None,
     ) -> None:
-        self.data_dir = str(Path(data_dir) if data_dir else DEFAULT_DATA_DIR)
-        self._cov_by_date, self._rebal_dates = _load_cov_panel(self.data_dir)
+        data_path = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
+        self.data_dir = str(data_path)
+        self.variant = _infer_variant(data_path, used_default=data_dir is None)
+        self._cov_by_date, self._rebal_dates = _load_cov_panel(
+            self.data_dir,
+            self.variant,
+        )
+        factor_names = self._cov_by_date[self._rebal_dates[0]][0]
+        exposure_columns = set(_scan_exposure(self.data_dir).collect_schema().names())
+        required_columns = {"rebal_date", "code", "spec_var", *factor_names}
+        missing_columns = sorted(required_columns - exposure_columns)
+        if missing_columns:
+            raise ValueError(
+                f"CNE6{self.variant or ''} 暴露面板缺少字段：{missing_columns}"
+            )
 
         wanted = self._asof_dates_for(query_dates)
         self._exposure_by_date: dict[date, pl.DataFrame] = {}

@@ -3,7 +3,7 @@
 消费的格式。
 
 输出：
-    data/barra_cne6/{exposure_panel,factor_cov_panel}.parquet    —— CNE6S（短周期 hl=63）
+    data/barra_cne6_S/{exposure_panel,factor_cov_panel}.parquet    —— CNE6S（短周期 hl=63）
     data/barra_cne6_L/{exposure_panel,factor_cov_panel}.parquet  —— CNE6L（长周期 hl=252）
 
 因子集合：
@@ -28,55 +28,135 @@ data/cache/ashare_daily_<year>.parquet 的 industry_l1（中信一级）做 one-
 from __future__ import annotations
 
 import sys
+import uuid
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import numpy as np
 import polars as pl
 
 from hqopt.data.clickhouse_db import query_df
+from hqopt.risk.cne6_risk import STYLE_FACTORS_L, STYLE_FACTORS_S
 
 CACHE_DIR = Path("data/cache")
-OUT_DIRS = {"S": Path("data/barra_cne6"), "L": Path("data/barra_cne6_L")}
+OUT_DIRS = {"S": Path("data/barra_cne6_S"), "L": Path("data/barra_cne6_L")}
 SOURCE_DATABASE = "test_barra_cne6_gao"
 
 # 提取时间范围（含端点）；按需调整
-START_DATE = "2020-01-01"
-END_DATE = "2026-05-31"
+# 2026-07-29 扩至全历史：源库 factor_exposure 自 2013-12-31、factor_return 自 2014-01-02，
+# 本地行业缓存 data/cache/ashare_daily_*.parquet 覆盖 2012~2026，故 2014-01-01 起点可用。
+START_DATE = "2014-01-01"
+END_DATE = "2026-06-30"
 
 # CNE6L 16 个核心风格；CNE6S 在此基础上增加 4 个快策略风格。
-STYLE_FACTORS_L: tuple[str, ...] = (
-    "Size", "MidCap", "Beta", "Momentum", "ResidualVolatility", "LongTermReversal",
-    "Liquidity", "Value", "EarningsYield", "Growth", "Profitability",
-    "InvestmentQuality", "EarningsQuality", "EarningsVariability", "Leverage",
-    "DividendYield",
-)
-STYLE_FACTORS_S: tuple[str, ...] = (
-    *STYLE_FACTORS_L,
-    "AnalystSentiment", "IndustryMomentum", "Seasonality", "ShortTermReversal",
-)
 STYLE_FACTORS_BY_VARIANT = {"S": STYLE_FACTORS_S, "L": STYLE_FACTORS_L}
 EXCLUDED_INDUSTRIES = {"", "未知"}
 
 
+def validate_exposure_source() -> None:
+    """确认估计域内每个股票日恰好具有 20 个有限风格暴露。"""
+    factor_names = ", ".join(f"'{factor}'" for factor in STYLE_FACTORS_S)
+    stats = query_df(
+        f"""
+        SELECT
+            count() AS groups,
+            min(factor_count) AS min_factor_count,
+            max(factor_count) AS max_factor_count,
+            min(row_count) AS min_row_count,
+            max(row_count) AS max_row_count,
+            countIf(
+                factor_count != {len(STYLE_FACTORS_S)}
+                OR row_count != {len(STYLE_FACTORS_S)}
+            ) AS bad_groups,
+            sum(invalid_values) AS invalid_values
+        FROM (
+            SELECT
+                asof_date,
+                code,
+                uniqExact(factor_name) AS factor_count,
+                count() AS row_count,
+                countIf(NOT isFinite(zscore)) AS invalid_values
+            FROM {SOURCE_DATABASE}.factor_exposure FINAL
+            WHERE univ_flag = 1
+              AND asof_date BETWEEN '{START_DATE}' AND '{END_DATE}'
+              AND factor_name IN ({factor_names})
+            GROUP BY asof_date, code
+        )
+        """
+    )
+    if stats.height != 1:
+        raise ValueError("CNE6 factor_exposure 覆盖统计返回异常")
+    row = stats.row(0, named=True)
+    expected = len(STYLE_FACTORS_S)
+    if (
+        int(row["groups"] or 0) == 0
+        or int(row["min_factor_count"] or 0) != expected
+        or int(row["max_factor_count"] or 0) != expected
+        or int(row["min_row_count"] or 0) != expected
+        or int(row["max_row_count"] or 0) != expected
+        or int(row["bad_groups"] or 0) != 0
+        or int(row["invalid_values"] or 0) != 0
+    ):
+        raise ValueError(
+            "CNE6 factor_exposure 内容合同失败："
+            f"groups={row['groups']} "
+            f"factor_count={row['min_factor_count']}~{row['max_factor_count']} "
+            f"row_count={row['min_row_count']}~{row['max_row_count']} "
+            f"bad_groups={row['bad_groups']} invalid_values={row['invalid_values']}"
+        )
+
+
+def _quarter_ranges(start: date, end: date) -> list[tuple[date, date]]:
+    ranges: list[tuple[date, date]] = []
+    current = start
+    while current <= end:
+        month_index = current.year * 12 + current.month - 1 + 3
+        next_start = date(month_index // 12, month_index % 12 + 1, 1)
+        chunk_end = min(end, next_start - timedelta(days=1))
+        ranges.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return ranges
+
+
 def load_exposure_base() -> pl.DataFrame:
-    # 一次拉齐 S 所需 20 个风格；L 在内存中选取其 16 个核心风格，避免重复扫描大表。
+    # 暴露结果约 7 百万行；按季度读取避免单个 GB 级 HTTP 响应中断。
+    # 各块仍使用同一 FINAL 语义，合并后再统一构建 S/L 面板。
     pivot_cols = ",\n        ".join(
         f"sumIf(zscore, factor_name = '{f}') AS {f}" for f in STYLE_FACTORS_S
     )
     factor_names = ", ".join(f"'{factor}'" for factor in STYLE_FACTORS_S)
-    sql = f"""
-        SELECT asof_date, code,
-        {pivot_cols}
-        FROM {SOURCE_DATABASE}.factor_exposure
-        WHERE univ_flag = 1
-          AND asof_date BETWEEN '{START_DATE}' AND '{END_DATE}'
-          AND factor_name IN ({factor_names})
-        GROUP BY asof_date, code
-    """
-    df = query_df(sql)
+    frames = []
+    for chunk_start, chunk_end in _quarter_ranges(
+        date.fromisoformat(START_DATE),
+        date.fromisoformat(END_DATE),
+    ):
+        sql = f"""
+            SELECT asof_date, code,
+            {pivot_cols}
+            FROM {SOURCE_DATABASE}.factor_exposure FINAL
+            WHERE univ_flag = 1
+              AND asof_date BETWEEN '{chunk_start}' AND '{chunk_end}'
+              AND factor_name IN ({factor_names})
+            GROUP BY asof_date, code
+        """
+        frame = query_df(sql)
+        if frame.is_empty():
+            raise ValueError(
+                f"CNE6 factor_exposure 查询为空：{chunk_start}~{chunk_end}"
+            )
+        print(f"      暴露分块 {chunk_start}~{chunk_end}: {frame.height:,} 行")
+        frames.append(frame)
+    df = pl.concat(frames, how="vertical")
     df = df.rename({"asof_date": "rebal_date"})
-    return df.with_columns(pl.col("rebal_date").cast(pl.Date), pl.lit(1.0).alias("Country"))
+    output = df.with_columns(
+        pl.col("rebal_date").cast(pl.Date),
+        pl.lit(1.0).alias("Country"),
+    )
+    if not np.isfinite(output.select(STYLE_FACTORS_S).to_numpy()).all():
+        raise ValueError("CNE6 factor_exposure 导出结果含 NaN/Inf")
+    return output
 
 
 def load_industry_dummies() -> tuple[pl.DataFrame, list[str]]:
@@ -101,34 +181,89 @@ def load_factor_cov(variant: str, factor_order: list[str]) -> pl.DataFrame:
     factor_names = ", ".join(f"'{factor}'" for factor in factor_order)
     cov = query_df(
         f"SELECT trade_date, factor_i, factor_j, cov "
-        f"FROM {SOURCE_DATABASE}.factor_cov_{variant} "
+        f"FROM {SOURCE_DATABASE}.factor_cov_{variant} FINAL "
         f"WHERE trade_date BETWEEN '{START_DATE}' AND '{END_DATE}' "
         f"AND factor_i IN ({factor_names}) AND factor_j IN ({factor_names})"
     ).filter(
         pl.col("factor_i").is_in(factor_order)
         & pl.col("factor_j").is_in(factor_order)
     )
+    if cov.is_empty():
+        raise ValueError(f"CNE6{variant} factor_cov 查询为空")
+    duplicates = (
+        cov.group_by(["trade_date", "factor_i", "factor_j"])
+        .len()
+        .filter(pl.col("len") != 1)
+    )
+    if not duplicates.is_empty():
+        raise ValueError(f"CNE6{variant} factor_cov 存在重复键")
+    expected_triangle = len(factor_order) * (len(factor_order) + 1) // 2
+    bad_dates = (
+        cov.group_by("trade_date")
+        .agg(
+            pl.len().alias("rows"),
+            pl.col("factor_i").n_unique().alias("factor_i_count"),
+            pl.col("factor_j").n_unique().alias("factor_j_count"),
+        )
+        .filter(
+            (pl.col("rows") != expected_triangle)
+            | (pl.col("factor_i_count") != len(factor_order))
+            | (pl.col("factor_j_count") != len(factor_order))
+        )
+    )
+    if not bad_dates.is_empty():
+        raise ValueError(
+            f"CNE6{variant} factor_cov 非完整三角矩阵，"
+            f"示例={bad_dates.head(3).to_dicts()}"
+        )
+    if not np.isfinite(cov["cov"].to_numpy()).all():
+        raise ValueError(f"CNE6{variant} factor_cov 含 NaN/Inf")
+
     swapped = cov.rename({"factor_i": "factor_j", "factor_j": "factor_i"}).select(cov.columns)
     sym = pl.concat([cov, swapped]).unique(subset=["trade_date", "factor_i", "factor_j"])
     wide = sym.pivot(index=["trade_date", "factor_i"], on="factor_j", values="cov")
-    return (
+    output = (
         wide.select(["trade_date", "factor_i", *factor_order])
         .rename({"trade_date": "rebal_date", "factor_i": "factor"})
         .with_columns(pl.col("rebal_date").cast(pl.Date))
     )
+    if any(output.select(factor_order).null_count().row(0)):
+        raise ValueError(f"CNE6{variant} factor_cov 对称化后仍有缺失值")
+    return output
 
 
 def load_spec_var(variant: str) -> pl.DataFrame:
     sr = query_df(
-        f"SELECT trade_date, code, var FROM {SOURCE_DATABASE}.specific_risk_{variant} "
+        f"SELECT trade_date, code, var FROM {SOURCE_DATABASE}.specific_risk_{variant} FINAL "
         f"WHERE trade_date BETWEEN '{START_DATE}' AND '{END_DATE}'"
     )
+    if sr.is_empty():
+        raise ValueError(f"CNE6{variant} specific_risk 查询为空")
+    if not np.isfinite(sr["var"].to_numpy()).all() or (sr["var"] <= 0).any():
+        raise ValueError(f"CNE6{variant} specific_risk 含非正值或 NaN/Inf")
+    duplicates = (
+        sr.group_by(["trade_date", "code"]).len().filter(pl.col("len") != 1)
+    )
+    if not duplicates.is_empty():
+        raise ValueError(f"CNE6{variant} specific_risk 存在重复键")
     return sr.rename({"trade_date": "rebal_date", "var": "spec_var"}).with_columns(
         pl.col("rebal_date").cast(pl.Date)
     )
 
 
+def _atomic_write_parquet(frame: pl.DataFrame, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        frame.write_parquet(temporary)
+        temporary.replace(output)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main() -> None:
+    print("[0/3] 校验新库 factor_exposure 的 20 风格内容合同 ...")
+    validate_exposure_source()
     print(
         "[1/3] 拉取因子暴露 "
         f"({SOURCE_DATABASE}, zscore, univ_flag==1, ClickHouse SQL 端 pivot) ..."
@@ -172,9 +307,8 @@ def main() -> None:
 
         cov = load_factor_cov(variant, factor_order)
 
-        out_dir.mkdir(parents=True, exist_ok=True)
-        exposure.write_parquet(out_dir / "exposure_panel.parquet")
-        cov.write_parquet(out_dir / "factor_cov_panel.parquet")
+        _atomic_write_parquet(exposure, out_dir / "exposure_panel.parquet")
+        _atomic_write_parquet(cov, out_dir / "factor_cov_panel.parquet")
         print(
             f"      exposure: {exposure.height:,} 行   "
             f"cov: {cov.height:,} 行  日期 {cov['rebal_date'].min()}~{cov['rebal_date'].max()}"

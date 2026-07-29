@@ -7,7 +7,24 @@
 
 ---
 
-## 未发布（工作区，2026-07-28）
+## 未发布（工作区，2026-07-29）
+
+### ⚠️ 破坏性：CNE6S 面板目录改名 `data/barra_cne6` → `data/barra_cne6_S`
+
+`hqopt/risk/cne6_risk.py`、`hqopt/risk/attribution_data.py`、`data_manifest.yaml`、
+`scripts/export_cne6_panels.py`、`scripts/export_factor_attribution.py`
+
+S 与 L 两套模型的目录名此前不对称（S 无后缀），容易误配成跨模型混用。现统一为
+`barra_cne6_S` / `barra_cne6_L`。同时对默认 S/L 目录加**因子合同校验**（fail-closed）：
+因子数须为 S=51 / L=47、风格齐全、L 不得含 4 个快因子、协方差行列完整且无 NaN/Inf、
+暴露面板字段齐全，任一不满足直接抛 `ValueError` 而非静默降级。
+
+- **兼容**：旧目录名 `barra_cne6` 仍识别为 S 变体（仅用于变体推断，不再是默认路径）。
+- **导出区间**：`export_cne6_panels.py` 由 2020-01-01~2026-05-31 扩至
+  2014-01-01~2026-06-30，并改为按季度分块查询。
+- **影响**：数据路径与校验，不改变既有面板的数值。旧目录需重命名或重新导出，
+  否则 `CNE6RiskModel` 按默认路径找不到面板。
+- **需重跑**：仅需重新导出面板；已产出的回测结果数值不受此项影响。
 
 ### ⚠️ 破坏性：CNE6 风险模型切换到 test_barra_cne6_gao
 

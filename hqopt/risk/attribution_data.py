@@ -2,8 +2,8 @@
 
 消费 scripts/export_factor_attribution.py 从 ClickHouse test_barra_cne6_gao
 对应 S/L 模型导出的：
-    data/barra_cne6[_L]/factor_return.parquet    —— trade_date, factor_name, ret
-    data/barra_cne6[_L]/specific_return.parquet  —— trade_date, code, u
+    data/barra_cne6_S[_L]/factor_return.parquet    —— trade_date, factor_name, ret
+    data/barra_cne6_S[_L]/specific_return.parquet  —— trade_date, code, u
 
 与 hqopt.risk.cne6_risk.CNE6RiskModel 消费的 exposure_panel.parquet
 同源（均来自 test_barra_cne6_gao 的对应 S/L 模型），因子名对齐，供 hqopt.analysis.attribution
@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "barra_cne6"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "barra_cne6_S"
 
 
 @lru_cache(maxsize=4)
