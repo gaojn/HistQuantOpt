@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -255,11 +255,35 @@ def test_factor_return_allows_industry_without_constituents_for_one_day() -> Non
 
 
 def test_exposure_quarter_ranges_cover_interval_without_overlap() -> None:
-    assert exporter._quarter_ranges(
+    """季度粒度（months=3）保持原切分语义。"""
+    assert exporter._date_ranges(
         date(2024, 2, 15),
         date(2024, 8, 2),
+        months=3,
     ) == [
         (date(2024, 2, 15), date(2024, 4, 30)),
         (date(2024, 5, 1), date(2024, 7, 31)),
         (date(2024, 8, 1), date(2024, 8, 2)),
     ]
+
+
+def test_exposure_default_ranges_are_monthly() -> None:
+    """默认按月切分：季度块在 2021 年后会触发服务端 MEMORY_LIMIT_EXCEEDED。"""
+    assert exporter.CHUNK_MONTHS == 1
+    assert exporter._date_ranges(date(2024, 2, 15), date(2024, 4, 10)) == [
+        (date(2024, 2, 15), date(2024, 2, 29)),
+        (date(2024, 3, 1), date(2024, 3, 31)),
+        (date(2024, 4, 1), date(2024, 4, 10)),
+    ]
+
+
+@pytest.mark.parametrize("months", [1, 3])
+def test_exposure_ranges_tile_interval_exactly(months: int) -> None:
+    """任意粒度下分块都必须无缺口、无重叠地恰好铺满区间。"""
+    start, end = date(2014, 1, 1), date(2026, 6, 30)
+    ranges = exporter._date_ranges(start, end, months=months)
+    assert ranges[0][0] == start
+    assert ranges[-1][1] == end
+    for (_, prev_end), (next_start, _) in zip(ranges, ranges[1:], strict=False):
+        assert next_start == prev_end + timedelta(days=1)
+    assert all(s <= e for s, e in ranges)

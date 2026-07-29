@@ -54,6 +54,10 @@ END_DATE = "2026-06-30"
 STYLE_FACTORS_BY_VARIANT = {"S": STYLE_FACTORS_S, "L": STYLE_FACTORS_L}
 EXCLUDED_INDUSTRIES = {"", "未知"}
 
+# 暴露分块粒度（自然月）。服务端 56 GiB 内存为共享资源，调大有超限风险，
+# 详见 _date_ranges 的说明。
+CHUNK_MONTHS = 1
+
 
 def validate_exposure_source() -> None:
     """确认估计域内每个股票日恰好具有 20 个有限风格暴露。"""
@@ -108,11 +112,18 @@ def validate_exposure_source() -> None:
         )
 
 
-def _quarter_ranges(start: date, end: date) -> list[tuple[date, date]]:
+def _date_ranges(start: date, end: date, *, months: int = CHUNK_MONTHS) -> list[tuple[date, date]]:
+    """按 ``months`` 个自然月切分区间（含端点）。
+
+    2026-07-29 由季度改为按月：季度块在 2021 年后单块约 25 万行，叠加
+    ``FINAL`` 在 2.58 亿行 ReplacingMergeTree 上的去重与 20 列 pivot，
+    服务端触发 MEMORY_LIMIT_EXCEEDED（56 GiB 上限）。按月切分把单查询
+    内存降到约 1/3；服务器内存是与他人共享的，块不宜再放大。
+    """
     ranges: list[tuple[date, date]] = []
     current = start
     while current <= end:
-        month_index = current.year * 12 + current.month - 1 + 3
+        month_index = current.year * 12 + current.month - 1 + months
         next_start = date(month_index // 12, month_index % 12 + 1, 1)
         chunk_end = min(end, next_start - timedelta(days=1))
         ranges.append((current, chunk_end))
@@ -128,7 +139,7 @@ def load_exposure_base() -> pl.DataFrame:
     )
     factor_names = ", ".join(f"'{factor}'" for factor in STYLE_FACTORS_S)
     frames = []
-    for chunk_start, chunk_end in _quarter_ranges(
+    for chunk_start, chunk_end in _date_ranges(
         date.fromisoformat(START_DATE),
         date.fromisoformat(END_DATE),
     ):
