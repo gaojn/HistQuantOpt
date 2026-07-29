@@ -19,10 +19,12 @@ f_k(t)/u_i(t) 来自 ClickHouse test_barra_cne6_gao 对应 S/L 模型（与暴�
 :mod:`hqopt.risk.attribution_data`），保证暴露与收益出自
 同一套模型，残差自检才有意义。
 
-多期链接用 Carino (1999) 平滑系数，基于每日已实现的主动收益本身
-（而非分别对组合/基准收益取对数——本模块不强制要求单独的组合、基准
-收益序列），|a_t| ≪ 1（日频通常满足）时近似成立，保证 Σ 各归因项
-链接后的累计贡献 = 真实几何累计主动收益（"合计"行即为该恒等式的自检）。
+多期链接采用相对收益口径。先把每日算术贡献除以 ``1 + 基准收益(t)``，
+使各项之和等于每日相对主动收益
+``g_t = (1 + 组合收益(t)) / (1 + 基准收益(t)) - 1``；再用
+Carino (1999) 平滑系数链接。由此保证 Σ 各归因项链接后的累计贡献严格等于
+``Π(1+组合收益) / Π(1+基准收益) - 1``，不再把 ``Π(1+Rp-Rb)-1``
+近似冒充真实几何超额收益（"合计"行即为该恒等式的自检）。
 
 残差自检：每日 ``主动收益 - (风格+行业+Country+特质)`` 理论上应 ≈ 0
 （在暴露/收益对齐正确、且持仓票均在风险模型估计域内时，两者恒等）。
@@ -74,25 +76,45 @@ def _align_union(a: pd.Series, b: pd.Series) -> tuple[pd.Series, pd.Series]:
 
 def _carino_k(r: float) -> float:
     """Carino(1999) 对数平滑系数：ln(1+r)/r，r→0 时取极限 1。"""
+    if r <= -1.0:
+        raise ValueError(f"Carino 收益必须大于 -100%，当前为 {r:.6f}")
     if abs(r) < 1e-10:
         return 1.0
     return float(np.log1p(r) / r)
 
 
-def _carino_summary(items: dict[str, pd.Series], active_return: pd.Series) -> pd.DataFrame:
-    """多期 Carino 链接 + 简单 t 统计，汇总成归因表。"""
-    n = len(active_return)
-    r_geo = float((1 + active_return).prod() - 1)
+def _carino_summary(
+    items: dict[str, pd.Series],
+    portfolio_return: pd.Series,
+    benchmark_return: pd.Series,
+) -> pd.DataFrame:
+    """按组合/基准净值比做精确 Carino 链接，并计算简单 t 统计。"""
+    if not portfolio_return.index.equals(benchmark_return.index):
+        raise ValueError("组合与基准收益日期必须完全对齐")
+    n = len(portfolio_return)
+    if n == 0:
+        raise ValueError("无可链接的收益日期")
+
+    benchmark_gross = 1.0 + benchmark_return
+    if (benchmark_gross <= 0.0).any():
+        raise ValueError("基准单日收益必须大于 -100%")
+    relative_active = (1.0 + portfolio_return) / benchmark_gross - 1.0
+    r_geo = float((1.0 + relative_active).prod() - 1.0)
     k = _carino_k(r_geo)
-    k_t = active_return.apply(_carino_k)
+    k_t = relative_active.apply(_carino_k)
 
     rows = []
-    for name, s in items.items():
-        linked = float((s * k_t / k).sum())
+    for name, series in items.items():
+        relative_series = series / benchmark_gross
+        linked = float((relative_series * k_t / k).sum())
         annualized = linked * (_TRADING_DAYS / n)
         pct = linked / r_geo * 100 if abs(r_geo) > 1e-12 else float("nan")
-        std = float(s.std(ddof=1))
-        t_stat = float(s.mean() / (std / np.sqrt(n))) if std > 1e-12 else float("nan")
+        std = float(relative_series.std(ddof=1))
+        t_stat = (
+            float(relative_series.mean() / (std / np.sqrt(n)))
+            if std > 1e-12
+            else float("nan")
+        )
         ann_vol = std * np.sqrt(_TRADING_DAYS)
         rows.append({
             "归因项": name,
@@ -174,6 +196,8 @@ class ReturnAttributor:
         factor_names: list[str] | None = None
         factor_rows: dict = {}
         specific_rows: dict = {}
+        portfolio_rows: dict = {}
+        benchmark_rows: dict = {}
         truth_rows: dict = {}
         coverage_rows: dict = {}
         skipped = 0
@@ -217,7 +241,8 @@ class ReturnAttributor:
 
             for d in period_dates:
                 w_p = period_weight.loc[d].reindex(tickers).fillna(0.0)
-                w_active = w_p - w_b.reindex(tickers).fillna(0.0)
+                w_b_aligned = w_b.reindex(tickers).fillna(0.0)
+                w_active = w_p - w_b_aligned
                 w_arr = w_active.values
                 x_active = w_arr @ risk_snap.X
 
@@ -228,7 +253,9 @@ class ReturnAttributor:
                 specific_rows[d] = float(w_arr @ u_t.values)
 
                 r_t = daily_ret.loc[d].reindex(tickers).fillna(0.0)
-                truth_rows[d] = float(w_arr @ r_t.values)
+                portfolio_rows[d] = float(w_p.values @ r_t.values)
+                benchmark_rows[d] = float(w_b_aligned.values @ r_t.values)
+                truth_rows[d] = portfolio_rows[d] - benchmark_rows[d]
                 total_active_l1 = float(np.abs(w_arr).sum())
                 coverage_rows[d] = (
                     float(np.abs(w_arr[risk_snap.covered_mask]).sum()) / total_active_l1
@@ -240,6 +267,8 @@ class ReturnAttributor:
 
         factor_daily = pd.DataFrame(factor_rows, index=factor_names).T.sort_index()
         specific_daily = pd.Series(specific_rows).sort_index()
+        portfolio_return = pd.Series(portfolio_rows).sort_index()
+        benchmark_return = pd.Series(benchmark_rows).sort_index()
         active_truth = pd.Series(truth_rows).sort_index()
         coverage = pd.Series(coverage_rows).sort_index()
 
@@ -253,6 +282,8 @@ class ReturnAttributor:
             "industry_total": factor_daily[industry_cols].sum(axis=1),
             "country": factor_daily[_COUNTRY] if _COUNTRY in factor_daily.columns else 0.0,
             "specific": specific_daily,
+            "portfolio_return": portfolio_return,
+            "benchmark_return": benchmark_return,
             "active_return": active_truth,
             "coverage_pct": coverage,
         })
@@ -260,6 +291,11 @@ class ReturnAttributor:
             daily["style_total"] + daily["industry_total"] + daily["country"] + daily["specific"]
         )
         daily["residual"] = daily["active_return"] - daily["explained"]
+        daily["relative_active_return"] = (
+            (1.0 + daily["portfolio_return"])
+            / (1.0 + daily["benchmark_return"])
+            - 1.0
+        )
 
         items: dict[str, pd.Series] = {f: factor_daily[f] for f in style_cols}
         items["行业合计"] = daily["industry_total"]
@@ -268,7 +304,11 @@ class ReturnAttributor:
         items["残差"] = daily["residual"]
         items["合计(主动收益)"] = daily["active_return"]
 
-        summary = _carino_summary(items, daily["active_return"])
+        summary = _carino_summary(
+            items,
+            daily["portfolio_return"],
+            daily["benchmark_return"],
+        )
 
         return AttributionResult(factor_daily=factor_daily, daily=daily, summary=summary)
 

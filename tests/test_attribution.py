@@ -149,16 +149,23 @@ def test_style_direction_is_positive(attributor, weight_df, benchmark_weight_df)
     assert result.summary.loc["Size", "t统计"] > 0
 
 
-def test_linked_contributions_sum_to_total(attributor, weight_df, benchmark_weight_df):
-    """Carino 链接后，各归因项（不含"合计"行本身）累计贡献之和 = 总主动收益累计贡献。"""
+def test_linked_contributions_sum_to_exact_geometric_excess(
+    attributor, weight_df, benchmark_weight_df
+):
+    """链接贡献之和严格等于组合/基准净值比，而非主动日差的近似复利。"""
     result = attributor.run(weight_df, benchmark_weight_df, _adj_close())
     items_sum = result.summary.drop(index="合计(主动收益)")["累计贡献"].sum()
     total = result.summary.loc["合计(主动收益)", "累计贡献"]
     assert items_sum == pytest.approx(total, abs=1e-9)
 
-    # 累计贡献应等于真实几何累计主动收益 Π(1+a_t)-1
-    geo_total = float((1 + result.daily["active_return"]).prod() - 1)
-    assert total == pytest.approx(geo_total, abs=1e-9)
+    portfolio_growth = float((1.0 + result.daily["portfolio_return"]).prod())
+    benchmark_growth = float((1.0 + result.daily["benchmark_return"]).prod())
+    exact_geometric_excess = portfolio_growth / benchmark_growth - 1.0
+    legacy_approximation = float((1.0 + result.daily["active_return"]).prod() - 1.0)
+    assert total == pytest.approx(exact_geometric_excess, abs=1e-9)
+    assert float((1.0 + result.daily["relative_active_return"]).prod() - 1.0) \
+        == pytest.approx(exact_geometric_excess, abs=1e-9)
+    assert exact_geometric_excess != pytest.approx(legacy_approximation, abs=1e-9)
 
 
 def test_coverage_gap_leaks_into_residual(attributor, weight_df, benchmark_weight_df):

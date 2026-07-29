@@ -398,8 +398,16 @@ $$
 $f(t)$（因子收益）、$u(t)$（个股特质收益）取自 ClickHouse
 `test_barra_cne6_gao.factor_return_S/L` / `specific_return_S/L`，与暴露 $X$
 （`test_barra_cne6_gao.factor_exposure`）**同源且同模型**，保证残差
-自检有意义。多期用 Carino(1999) 平滑系数链接，保证 $\Sigma$ 各归因项累计 =
-真实几何累计主动收益。
+自检有意义。多期先把每日算术贡献 $c_{j,t}$ 转为相对贡献
+$\tilde c_{j,t}=c_{j,t}/(1+R_{b,t})$，其和等于
+$g_t=(1+R_{p,t})/(1+R_{b,t})-1$，再用 Carino(1999) 平滑系数链接。因此严格满足：
+
+$$
+\sum_j C_j=\prod_t(1+g_t)-1
+=\frac{\prod_t(1+R_{p,t})}{\prod_t(1+R_{b,t})}-1
+$$
+
+这里不再使用 $\prod_t(1+R_{p,t}-R_{b,t})-1$ 的近似口径。
 
 **残差自检**：每日「主动收益 − (风格+行业+Country+特质)」理论上应 ≈0；非零
 主要来自**覆盖缺口**——`test_barra_cne6_gao` 只覆盖其估计域（`univ_flag==1`，剔除次新/
