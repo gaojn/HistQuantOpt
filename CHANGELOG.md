@@ -125,6 +125,9 @@ Country + 30个行业（47因子）。源库协方差中的空行业因子会同
 - 两个优化器抽出 `optimizer/_common.py`；`run_batch_optimize` 与
   `RealisticBacktester.run` 拆分为多阶段。三处均以随机化场景验证输出逐位一致。
 - CI 启用 ruff `E/F/I/B/UP/SIM/C4` 规则集与 85% 覆盖率门禁。
+- `query_df` 对传输中断类异常（`IncompleteRead` / `RemoteDisconnected` /
+  连接重置 / socket 超时）做指数退避重试（默认 4 次）；HTTP 4xx/5xx 属服务端
+  确定性拒绝，不重试。此前大结果集分块导出中途断流会让已完成的工作全部作废。
 
 ---
 

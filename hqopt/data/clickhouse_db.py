@@ -21,9 +21,12 @@ HTTP 接口 + ``FORMAT Parquet`` → polars，零额外依赖（标准库 urllib
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import os
 import re
+import socket
+import time
 import urllib.error
 import urllib.request
 
@@ -60,12 +63,29 @@ def _cfg() -> dict:
     }
 
 
-def query_df(sql: str, *, timeout: int = _TIMEOUT) -> pl.DataFrame:
+# 大结果集的 chunked 响应可能在传输中途被截断（实测 2026-07-29：CNE6 暴露
+# 分季导出在第 31/50 块抛 IncompleteRead，30 块已完成的工作全部作废）。
+# 这类异常是瞬时网络问题、重试即可恢复，且不属于 HTTPError/URLError，
+# 故单独列出并做指数退避重试；HTTP 4xx/5xx 是服务端确定性拒绝，不重试。
+_TRANSIENT_ERRORS = (
+    http.client.IncompleteRead,
+    http.client.RemoteDisconnected,
+    ConnectionResetError,
+    socket.timeout,
+)
+_MAX_ATTEMPTS = 4
+_BACKOFF_BASE = 2.0
+
+
+def query_df(
+    sql: str, *, timeout: int = _TIMEOUT, max_attempts: int = _MAX_ATTEMPTS
+) -> pl.DataFrame:
     """执行只读查询，返回 polars DataFrame（经 ``FORMAT Parquet``）。
 
     Args:
         sql: SQL 语句；未显式带 ``FORMAT`` 子句时自动追加 ``FORMAT Parquet``。
         timeout: 超时秒数。
+        max_attempts: 瞬时网络错误的最大尝试次数（含首次），退避 2/4/8 秒。
 
     Returns:
         polars.DataFrame；空结果返回空 DataFrame。
@@ -77,16 +97,29 @@ def query_df(sql: str, *, timeout: int = _TIMEOUT) -> pl.DataFrame:
     if not _FORMAT_RE.search(q):
         q += "\nFORMAT Parquet"
     url = f"http://{cfg['host']}:{cfg['port']}/?database={cfg['db']}"
-    req = urllib.request.Request(url, data=q.encode("utf-8"), method="POST")
     token = base64.b64encode(f"{cfg['user']}:{cfg['pwd']}".encode()).decode()
-    req.add_header("Authorization", f"Basic {token}")
-    try:
-        raw = urllib.request.urlopen(req, timeout=timeout).read()  # noqa: S310 (固定内网HTTP)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")[:800]
-        raise RuntimeError(f"ClickHouse 查询失败 HTTP {e.code}: {body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"ClickHouse 连接失败: {e.reason}") from e
+    raw = b""
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(url, data=q.encode("utf-8"), method="POST")
+        req.add_header("Authorization", f"Basic {token}")
+        try:
+            raw = urllib.request.urlopen(req, timeout=timeout).read()  # noqa: S310 (固定内网HTTP)
+            break
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:800]
+            raise RuntimeError(f"ClickHouse 查询失败 HTTP {e.code}: {body}") from e
+        except _TRANSIENT_ERRORS as e:
+            if attempt == max_attempts:
+                raise RuntimeError(
+                    f"ClickHouse 响应中断，重试 {max_attempts} 次仍失败: {e!r}"
+                ) from e
+            time.sleep(_BACKOFF_BASE ** attempt)
+        except urllib.error.URLError as e:
+            # URLError 包装的底层瞬时错误（如 socket.timeout）同样值得重试
+            if isinstance(e.reason, _TRANSIENT_ERRORS) and attempt < max_attempts:
+                time.sleep(_BACKOFF_BASE ** attempt)
+                continue
+            raise RuntimeError(f"ClickHouse 连接失败: {e.reason}") from e
     if not raw:
         return pl.DataFrame()
     return pl.read_parquet(io.BytesIO(raw))
