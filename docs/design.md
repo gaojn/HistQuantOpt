@@ -190,8 +190,49 @@ hqopt/
 └── pipeline/
     ├── batch_optimize.py   # 逐期批量优化（两策略），三段式：
     │                       #   _prepare_inputs → _run_periods → _publish_outputs
+    │                       #   ⚠️ 1167 行，超出 800 行上限，拆分方案见 §6.1（未执行）
     └── universe.py         # 候选池过滤 / 成本向量 / 合成 alpha
 ```
+
+### 6.1 待执行：`batch_optimize.py` 拆分方案
+
+> **状态：已设计、未执行**（截至 2026-07-29，文件 1167 行）。此节记录方案与约束，
+> 避免后续重新推导。执行后请把本节改写为现状描述，并更新上方目录树。
+
+**动机**：单文件扛了配置解析、输入准备、逐期优化、成交推进、汇总发布五段职责，
+远超本项目 200–400 行/文件的习惯与 800 行上限。
+
+**硬约束（决定了怎么切）**：测试中有 **46 处 `monkeypatch.setattr(batch, ...)`**，
+打在 `batch_optimize` 模块命名空间的 5 个符号上——`CNE6RiskModel`、
+`AlphaMaxOptimizer`、`IndexEnhanceOptimizer`、`IndexBenchmarkWeights`、
+`ExecutionLedger`。**调用这 5 个构造器的代码必须留在 `batch_optimize.py`**：
+若移入子模块，函数会在子模块命名空间里解析这些名字，46 处 patch 全部静默失效——
+危险之处在于部分用例可能因此变成空转却依旧显示通过。
+
+只读访问（`batch._DUST_WEIGHT_TOL`、`batch._ExecutionWalker`、
+`batch._clean_target_weights`、`batch._build_alpha_policy`、`batch._parse_style_bound`、
+`batch.SYNTHETIC_ALPHA_WARNING_FILE` 等）不受影响，在 `batch_optimize.py` 里
+re-export 即可保持 `import hqopt.pipeline.batch_optimize as batch` 的导入面不变。
+
+**切分**（新建包 `hqopt/pipeline/batch/`）：
+
+| 模块 | 预估行数 | 内容 |
+|---|---:|---|
+| `batch/types.py` | ~165 | 阶段间数据结构：`_AlphaPolicy` `_RunConfig` `_BatchInputs` `_PeriodContext` `_RunStats` `_PeriodOutcome` + `_ExecutionWalker` |
+| `batch/config.py` | ~105 | `load_config` `_parse_run_config` `_parse_style_bound` `_optional_float` `_synthetic_alpha_enabled` `_alpha_staleness_warn_days` `_build_alpha_policy` |
+| `batch/periods.py` | ~350 | 阶段二逐期优化 + 成交日 helpers + `_clean_target_weights` |
+| `batch/publish.py` | ~150 | 阶段三 `_log_run_summary` `_publish_outputs` |
+| `batch_optimize.py`（保留） | ~330 | **阶段一**（`_load_market_panel` `_load_alpha_matrix` `_build_optimizer` `_build_risk_model` `_build_benchmark` `_prepare_inputs`，含上述 5 个可 patch 符号）+ `run_batch_optimize` + 全部 re-export |
+
+阶段二/三可以安全外移，是因为它们的依赖**全部通过 `_BatchInputs` 实例传入**，
+不引用模块级全局。
+
+**已否决的更彻底方案**：把阶段一也拆走、5 个依赖改为参数注入。主文件可再减 ~200 行，
+但需同步改 46 处 patch 目标，且每处都要验证「改完仍真正生效」——投入产出比不划算，
+且失败模式是假绿（patch 空转、测试照过），风险高于收益。
+
+**执行前提**：需在 `hqopt/pipeline/batch_optimize.py` 无未提交改动时进行——
+文件拆分会让并行的工作区 diff 无法合并。
 
 ---
 
