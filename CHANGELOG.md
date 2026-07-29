@@ -142,6 +142,13 @@ Country + 30个行业（47因子）。源库协方差中的空行业因子会同
 - `query_df` 对传输中断类异常（`IncompleteRead` / `RemoteDisconnected` /
   连接重置 / socket 超时）做指数退避重试（默认 4 次）；HTTP 4xx/5xx 属服务端
   确定性拒绝，不重试。此前大结果集分块导出中途断流会让已完成的工作全部作废。
+- **修复 `hqopt run` / `hqopt optimize` 无法启动**：数据包校验逻辑由
+  `scripts/verify_data_bundle.py` 移入 `hqopt/io/data_bundle.py`。此前包内
+  `run_manifest` 从 `scripts.` 导入，而 `scripts/` 既非包也不在 wheel 内，
+  控制台入口下必然 `ModuleNotFoundError`；pytest 会把 rootdir 加进 `sys.path`
+  故测试全绿而未暴露。`scripts/verify_data_bundle.py` 保留为 CLI 包装，
+  用法与既有导入不变。新增 `tests/test_package_imports_standalone.py`
+  以子进程在仓库外逐模块导入，守护同类问题。
 - `batch_optimize.py` 1167 → 350 行，阶段二/三拆入 `hqopt/pipeline/batch/` 包
   （`types` / `config` / `execution_walk` / `periods` / `publish`）。阶段一因 46 处
   `monkeypatch.setattr(batch, ...)` 打在其命名空间上而留在原模块，理由见

@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from scripts.verify_data_bundle import (
+from hqopt.io.data_bundle import (
     load_manifest,
     verify_lock,
     verify_profile,
