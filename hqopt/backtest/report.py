@@ -451,9 +451,9 @@ def _build_holdings_table(
             <td>{rank}</td>
             <td>{escape(str(code))}</td>
             <td>{escape(str(r['name']))}</td>
+            <td>{mv_str}</td>
             <td>{escape(str(r['industry']))}</td>
             <td>{r['weight']*100:.2f}%</td>
-            <td>{mv_str}</td>
         </tr>
         """)
 
@@ -464,7 +464,7 @@ def _build_holdings_table(
     </p>
     <table class="stats-table">
         <thead><tr>
-            <th>排名</th><th>代码</th><th>名称</th><th>行业</th><th>权重</th><th>总市值(亿元)</th>
+            <th>排名</th><th>代码</th><th>名称</th><th>总市值(亿元)</th><th>行业</th><th>权重</th>
         </tr></thead>
         <tbody>{''.join(rows)}</tbody>
     </table>
