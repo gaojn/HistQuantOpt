@@ -23,6 +23,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from hqopt.backtest.engine import BacktestResult
+from hqopt.io.data_panel import load_panel
 
 # 换手一节的主色（柱状图与指标卡片左边框共用，保持同组视觉一致）
 _TURNOVER_COLOR = "#c0392b"
@@ -39,9 +40,10 @@ def _annual_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> d
 
     - **信息比率**分子用几何年化超额 ``(1+R_p)/(1+R_b)-1`` 后年化，
       不用算术的 ``日均超额×252``。IR 的分母 TE 本身是年化量，分子必须同为年化。
-    - **Calmar** 分子用该分组的**累计**收益，与分母（同期最大回撤）同期，
-      不做年化外推。年度行与全期行均使用这一口径；否则不足一年的年份会被放大
-      （实测 3 个月样本累计 +8.99% 会外推成年化 +43.55%，Calmar 从 0.15 跳到 5.09）。
+    - **Calmar** 采用行业标准口径：年化收益(CAGR) / 最大回撤，年度行与全期行
+      统一使用年化收益作分子，跨不同长度区间可比。不足一年的分组年化后数值
+      会明显放大（短样本本就对年化敏感），属预期现象，不额外改写公式；
+      解读年度 Calmar 时结合样本天数判断即可。
     """
     n_days  = len(ret)
     n_years = n_days / 252 if n_days > 0 else 1
@@ -53,8 +55,8 @@ def _annual_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> d
     sharpe  = ((ret.mean() - rf_daily) / (ret.std() + 1e-12)) * np.sqrt(252) if len(ret) > 1 else 0
     nav     = (1 + ret).cumprod()
     mdd     = float((nav / nav.cummax() - 1).min()) if len(nav) > 0 else 0
-    # 分子分母同期：累计收益 / 同期最大回撤，不年化外推
-    calmar  = total / (abs(mdd) + 1e-12)
+    # 行业标准口径：年化收益(CAGR) / 最大回撤
+    calmar  = ann_ret / (abs(mdd) + 1e-12)
     bm_tot  = (1 + bm).prod() - 1
     exc     = ret - bm
     exc_vol = exc.std() * np.sqrt(252) if len(exc) > 1 else 0
@@ -85,8 +87,13 @@ def _annual_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> d
 
 
 def _turnover_summary(result: BacktestResult) -> dict[str, float]:
-    """汇总换手指标：年化双边换手、平均单期换手、年均调仓次数。"""
-    to = result.turnover.dropna()
+    """汇总换手指标：年化双边换手、平均单期换手、年均调仓次数。
+
+    一律按**调仓期**统计。若误用逐成交日的 ``result.turnover``，一次调仓在
+    T+1/T+2/T+3 的分次成交会各占一行，使 ``mean()`` 分母偏大、平均换手被
+    系统性低估（实测可低估约 1.7 倍），``rebalances`` 也会多计。
+    """
+    to = result.rebalance_turnover
     n_years = len(result.daily_ret) / 252 if len(result.daily_ret) > 0 else 1.0
     if len(to) == 0 or n_years <= 0:
         return {
@@ -104,8 +111,8 @@ def _turnover_summary(result: BacktestResult) -> dict[str, float]:
 
 
 def _yearly_turnover_table(result: BacktestResult) -> pd.DataFrame:
-    """按自然年汇总双边换手率与调仓次数。"""
-    to = result.turnover.dropna()
+    """按自然年汇总双边换手率与调仓次数（按调仓期计，理由见 _turnover_summary）。"""
+    to = result.rebalance_turnover
     if len(to) == 0:
         return pd.DataFrame(columns=["rebalance_count", "turnover", "avg_turnover"])
 
@@ -216,8 +223,8 @@ def _add_year_bands(fig, idx: pd.DatetimeIndex,
 
 
 def _make_turnover_chart(result: BacktestResult) -> str:
-    """换手率柱状图。"""
-    to = result.turnover.dropna()
+    """换手率柱状图（每根柱=一个调仓期，不把分次成交拆成多根）。"""
+    to = result.rebalance_turnover
     if len(to) == 0:
         return ""
     fig = go.Figure(data=go.Bar(
@@ -295,7 +302,7 @@ def _build_overall_card(result: BacktestResult) -> str:
         card("年化超额",    f"{pm.annual_excess_return*100:.2f}%", "组合 vs 基准",    "#3498db", colored=True),
         card("跟踪误差",    f"{pm.tracking_error*100:.2f}%",       "年化超额波动",     "#3498db"),
         card("信息比率IR",  f"{pm.info_ratio:.2f}",                "超额/跟踪误差",    "#3498db", colored=True),
-        card("超额Calmar",  f"{pm.excess_calmar:.2f}",             "全期累计超额/超额回撤", "#3498db"),
+        card("超额Calmar",  f"{pm.excess_calmar:.2f}",             "年化超额/超额回撤", "#3498db"),
         card("超额最大回撤", f"{pm.excess_max_drawdown*100:.2f}%",  "超额净值最大下行",  "#c0392b", colored=True),
     )
 
@@ -305,7 +312,7 @@ def _build_overall_card(result: BacktestResult) -> str:
         card("年化收益",  f"{pm.annual_return*100:.2f}%",  f"基准 {bm.annual_return*100:.2f}%",  "#e74c3c"),
         card("年化波动",  f"{pm.annual_vol*100:.2f}%",      f"基准 {bm.annual_vol*100:.2f}%",      "#95a5a6"),
         card("Sharpe",   f"{pm.sharpe:.2f}",               f"基准 {bm.sharpe:.2f}",               "#f39c12"),
-        card("Calmar",   f"{pm.calmar:.2f}",               f"全期累计/回撤；基准 {bm.calmar:.2f}", "#f39c12"),
+        card("Calmar",   f"{pm.calmar:.2f}",               f"年化收益/回撤；基准 {bm.calmar:.2f}", "#f39c12"),
         card("最大回撤",  f"{pm.max_drawdown*100:.2f}%",    f"基准 {bm.max_drawdown*100:.2f}%",    "#c0392b", colored=True),
     )
 
@@ -364,7 +371,7 @@ def _build_yearly_table(result: BacktestResult) -> str:
     html = """
     <p style="font-size:11px; color:#7f8c8d; margin:4px 0 4px 0">
     年度行收益为当年累计；全期行收益列为年化（标 *）。所有 Calmar 均为对应区间
-    累计收益 / 同期最大回撤，不做年化。Sharpe / IR / 波动率 / 跟踪误差均为年化。
+    年化收益 / 同期最大回撤（行业标准 CAGR/MDD 口径）。Sharpe / IR / 波动率 / 跟踪误差均为年化。
     </p>
     <table class="stats-table">
         <thead><tr>
@@ -403,6 +410,66 @@ def _build_yearly_table(result: BacktestResult) -> str:
         """
     html += "</tbody></table>"
     return html
+
+
+def _build_holdings_table(
+    result: BacktestResult, cache_dir: Path | str | None = None
+) -> tuple[str, pd.DataFrame | None]:
+    """最后一期实际持仓明细：代码/名称/行业/权重/总市值。
+
+    取 ``actual_weights`` 最后一行对应交易日的截面（as-of 当日，无前视风险），
+    与本地行情缓存的 name/industry_l1/total_mv 按 code 关联。缓存当日缺行的
+    股票（如退市滞留仓）显示"—"而不报错。``actual_weights`` 缺失时返回空表。
+    """
+    weights = result.actual_weights
+    if weights is None or weights.empty:
+        return "", None
+
+    last_date = weights.index[-1]
+    holdings = weights.iloc[-1]
+    holdings = holdings[holdings > 1e-6].sort_values(ascending=False)
+    if holdings.empty:
+        return "", None
+
+    target_date = last_date.date() if hasattr(last_date, "date") else last_date
+    panel = load_panel(
+        target_date, target_date,
+        columns=["code", "date", "name", "industry_l1", "total_mv"],
+        cache_dir=cache_dir,
+    ).to_pandas().set_index("code")
+
+    df = pd.DataFrame({"weight": holdings})
+    df["name"] = panel["name"].reindex(df.index).fillna("—")
+    df["industry"] = panel["industry_l1"].reindex(df.index).fillna("—")
+    df["mv_yi"] = panel["total_mv"].reindex(df.index) / 1e4   # 万元 → 亿元
+
+    rows = []
+    for rank, (code, r) in enumerate(df.iterrows(), start=1):
+        mv_str = f"{r['mv_yi']:.1f}" if pd.notna(r["mv_yi"]) else "—"
+        rows.append(f"""
+        <tr>
+            <td>{rank}</td>
+            <td>{escape(str(code))}</td>
+            <td>{escape(str(r['name']))}</td>
+            <td>{escape(str(r['industry']))}</td>
+            <td>{r['weight']*100:.2f}%</td>
+            <td>{mv_str}</td>
+        </tr>
+        """)
+
+    html = f"""
+    <p style="font-size:11px; color:#7f8c8d; margin:4px 0 4px 0">
+    截止 {target_date:%Y-%m-%d} 收盘的实际持仓（现金与权重≈0 的仓位不显示），
+    名称/行业/市值取自当日行情缓存截面。
+    </p>
+    <table class="stats-table">
+        <thead><tr>
+            <th>排名</th><th>代码</th><th>名称</th><th>行业</th><th>权重</th><th>总市值(亿元)</th>
+        </tr></thead>
+        <tbody>{''.join(rows)}</tbody>
+    </table>
+    """
+    return html, df.reset_index().rename(columns={"index": "code"})
 
 
 def _build_monthly_excess_table(result: BacktestResult) -> str:
@@ -455,7 +522,8 @@ def _build_monthly_excess_table(result: BacktestResult) -> str:
     # 月度胜率（按月）
     month_win: list[str] = []
     for m in range(1, 13):
-        vals = [grid[y][m] for y in years if grid[y][m] is not None]
+        # 过滤绑定到变量而非重复下标取值，使「已排除 None」对类型检查可见。
+        vals = [v for v in (grid[y][m] for y in years) if v is not None]
         if vals:
             win = sum(1 for v in vals if v > 0) / len(vals)
             month_win.append(f"{win*100:.0f}%")
@@ -465,7 +533,7 @@ def _build_monthly_excess_table(result: BacktestResult) -> str:
     # 年度胜率（按年）
     year_win: list[str] = []
     for y in years:
-        vals = [grid[y][m] for m in range(1, 13) if grid[y][m] is not None]
+        vals = [v for v in (grid[y][m] for m in range(1, 13)) if v is not None]
         if vals:
             win = sum(1 for v in vals if v > 0) / len(vals)
             year_win.append(f"{win*100:.0f}%")
@@ -475,7 +543,7 @@ def _build_monthly_excess_table(result: BacktestResult) -> str:
     # 年度超额合计
     year_sum: list[str] = []
     for y in years:
-        vals = [grid[y][m] for m in range(1, 13) if grid[y][m] is not None]
+        vals = [v for v in (grid[y][m] for m in range(1, 13)) if v is not None]
         year_sum.append(f"{sum(vals):.2f}%" if vals else "—")
 
     # 注：月度超额为算术差（月组合收益 − 月基准收益）；年度/全期超额采用几何口径
@@ -527,7 +595,9 @@ def _build_monthly_excess_table(result: BacktestResult) -> str:
 # 报告数据落地（parquet）
 # ─────────────────────────────────────────────────────────────────
 
-def _save_report_data(result: BacktestResult, output_path: Path) -> Path:
+def _save_report_data(
+    result: BacktestResult, output_path: Path, holdings_df: pd.DataFrame | None = None
+) -> Path:
     """
     把报告里展示的数据保存为 parquet，存到 <报告名>_data/ 目录。
       - timeseries.parquet : 净值/回撤/日收益（净值与回撤图）
@@ -535,6 +605,7 @@ def _save_report_data(result: BacktestResult, output_path: Path) -> Path:
       - metrics.parquet    : 总体绩效（组合 vs 基准）
       - yearly.parquet     : 年度分解表
       - monthly_excess.parquet : 月度超额（组合/基准/超额）
+      - holdings.parquet   : 最后一期持仓明细（代码/名称/行业/权重/市值），无持仓数据时不写
     """
     base = output_path.parent / f"{output_path.stem}_data"
     base.mkdir(parents=True, exist_ok=True)
@@ -552,7 +623,8 @@ def _save_report_data(result: BacktestResult, output_path: Path) -> Path:
     ts.index.name = "date"
     ts.to_parquet(base / "timeseries.parquet")
 
-    result.turnover.dropna().rename("turnover").to_frame().to_parquet(
+    # 与卡片/图表同口径：按调仓期。逐成交日的原始序列在顶层 turnover.parquet。
+    result.rebalance_turnover.rename("turnover").to_frame().to_parquet(
         base / "turnover.parquet"
     )
 
@@ -602,6 +674,9 @@ def _save_report_data(result: BacktestResult, output_path: Path) -> Path:
     monthly = pd.DataFrame({"port_ret": mp, "bm_ret": mb, "excess_ret": mp - mb})
     monthly.index.name = "month"
     monthly.to_parquet(base / "monthly_excess.parquet")
+
+    if holdings_df is not None and not holdings_df.empty:
+        holdings_df.to_parquet(base / "holdings.parquet")
 
     return base
 
@@ -687,6 +762,7 @@ def generate_html_report(
     title: str = "量化多头组合回测报告",
     subtitle: str | None = None,
     warning_banner: str | None = None,
+    cache_dir: Path | str | None = None,
 ) -> Path:
     """
     生成回测 HTML 报告。
@@ -703,6 +779,9 @@ def generate_html_report(
         副标题，默认显示回测时间区间
     warning_banner : str | None
         需要置顶展示的风险水印；例如含未来信息的合成 Alpha 警告
+    cache_dir : Path | str | None
+        最后一期持仓明细表用到的行情 parquet 缓存目录，None 用默认路径。
+        与 ``run_backtest`` 的 ``cache_dir`` 应保持一致。
 
     Returns
     -------
@@ -716,7 +795,7 @@ def generate_html_report(
         subtitle = (
             f"回测区间: {d0:%Y-%m-%d} ~ {d1:%Y-%m-%d}  |  "
             f"交易日数: {len(result.nav)}  |  "
-            f"再平衡次数: {len(result.turnover)}  |  "
+            f"再平衡次数: {len(result.rebalance_turnover)}  |  "
             f"生成时间: {datetime.now():%Y-%m-%d %H:%M}"
         )
 
@@ -726,6 +805,20 @@ def generate_html_report(
     monthly_table   = _build_monthly_excess_table(result)
     turnover_chart  = _make_turnover_chart(result)
     turnover_card   = _build_turnover_card(result)
+    holdings_html, holdings_df = _build_holdings_table(result, cache_dir=cache_dir)
+    holdings_date = (
+        result.actual_weights.index[-1]
+        if result.actual_weights is not None and not result.actual_weights.empty
+        else None
+    )
+    holdings_section = ""
+    if holdings_html:
+        holdings_section = f"""
+    <div class="section">
+      <h2>最后一期持仓明细（{holdings_date:%Y-%m-%d}）</h2>
+      {holdings_html}
+    </div>
+"""
     warning_html = ""
     if warning_banner:
         safe_warning = escape(warning_banner).replace("\n", "<br>")
@@ -769,6 +862,7 @@ def generate_html_report(
       {turnover_card}
       {turnover_chart}
     </div>
+    {holdings_section}
   </div>
 </body>
 </html>"""
@@ -776,6 +870,6 @@ def generate_html_report(
     output_path.write_text(html, encoding="utf-8")
 
     # 同步把报告展示用到的数据落地为 parquet
-    _save_report_data(result, output_path)
+    _save_report_data(result, output_path, holdings_df=holdings_df)
 
     return output_path

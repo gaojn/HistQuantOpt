@@ -60,11 +60,22 @@ class BacktestResult:
     daily_ret: pd.Series         # 组合日收益
     bm_ret: pd.Series            # 基准日收益
     excess_ret: pd.Series        # 超额日收益
-    turnover: pd.Series          # 调仓日双边换手率
+    turnover: pd.Series          # 逐**成交日**双边换手率（一次调仓可跨 T+1/T+2/T+3 多行）
     portfolio_metrics: PerformanceMetrics
     benchmark_metrics: PerformanceMetrics
     risk_free: float = 0.02      # 年化无风险利率（Sharpe 用，与 calc_metrics 保持一致）
     actual_weights: pd.DataFrame | None = None  # 每日收盘实际股票权重（现金不在列内）
+    # 按**调仓日**聚合的双边换手率：index=调仓日，把该期在 T+1/T+2/T+3 的分次
+    # 成交合并成一行。凡是「每期换手」「调仓次数」语义的口径都必须用它，
+    # 而不是 turnover——后者按成交日计，分母会偏大、平均换手被系统性低估。
+    turnover_by_rebalance: pd.Series | None = None
+
+    @property
+    def rebalance_turnover(self) -> pd.Series:
+        """每期换手率。缺 turnover_by_rebalance 的手工构造结果回退到逐日序列。"""
+        if self.turnover_by_rebalance is not None:
+            return self.turnover_by_rebalance.dropna()
+        return self.turnover.dropna()
 
     def summary(self) -> str:
         lines = [
@@ -78,13 +89,13 @@ class BacktestResult:
             "=" * 50,
             str(self.benchmark_metrics),
             "",
-            f"平均调仓换手  : {self.turnover.mean()*100:.1f}%",
+            f"平均调仓换手  : {self.rebalance_turnover.mean()*100:.1f}%",
         ]
         return "\n".join(lines)
 
 
 def calc_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> PerformanceMetrics:
-    """计算绩效指标；Calmar 分子统一使用对应全期累计收益，不做年化。"""
+    """计算绩效指标；Calmar 采用行业标准口径：年化收益(CAGR) / 最大回撤。"""
     n_days  = len(ret)
     n_years = n_days / 252 if n_days > 0 else 1
 
@@ -98,7 +109,7 @@ def calc_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> Perf
     nav       = (1 + ret).cumprod()
     drawdown  = nav / nav.cummax() - 1
     max_dd    = float(drawdown.min()) if len(drawdown) > 0 else 0.0
-    calmar    = total_ret / (abs(max_dd) + 1e-12)
+    calmar    = ann_ret / (abs(max_dd) + 1e-12)
 
     exc       = ret - bm
     # 超额收益用几何口径：(组合累计+1)/(基准累计+1)-1 后年化
@@ -115,7 +126,7 @@ def calc_metrics(ret: pd.Series, bm: pd.Series, risk_free: float = 0.02) -> Perf
     exc_nav_loc  = exc_nav_loc.ffill().fillna(1.0)
     exc_dd_series = exc_nav_loc / exc_nav_loc.cummax() - 1
     exc_max_dd   = float(exc_dd_series.min()) if len(exc_dd_series) > 0 else 0.0
-    exc_calmar   = total_exc_geo / (abs(exc_max_dd) + 1e-12)
+    exc_calmar   = ann_exc / (abs(exc_max_dd) + 1e-12)
 
     monthly_port = (1 + ret).resample("ME").prod() - 1
     monthly_bm   = (1 + bm).resample("ME").prod() - 1
@@ -164,7 +175,8 @@ class _ReplayRecords:
     """逐日重放产生的时间序列记录。"""
 
     port_values: pd.Series
-    turnover: dict
+    turnover: dict                    # key=成交日
+    turnover_by_rebalance: dict       # key=调仓日，汇总该期各次成交
     cash_ratios: list[float]
     actual_weight_rows: dict
 
@@ -267,9 +279,15 @@ def _replay_days(
     records = _ReplayRecords(
         port_values=pd.Series(0.0, index=frames.dates),
         turnover={},
+        # 预置全部调仓日：某期若被完全阻断（全部过期未成交），其换手是 0 而非
+        # 缺失，否则「每期平均」的分母会漏掉这一期。
+        turnover_by_rebalance=dict.fromkeys(weight_df.index, 0.0),
         cash_ratios=[],
         actual_weight_rows={},
     )
+
+    # 当前生效目标的提交日。成交永远属于最近一次提交的目标，而非成交当日。
+    active_target_day = None
 
     for day in frames.dates:
         # 当日盘中先执行上一交易日收盘后仍有效的目标。若当日收盘产生新目标，
@@ -284,6 +302,8 @@ def _replay_days(
         )
         if day_result.turnover > 0:
             records.turnover[day] = day_result.turnover
+            if active_target_day is not None:
+                records.turnover_by_rebalance[active_target_day] += day_result.turnover
 
         # ── 2. 计算当日 NAV（最近有效 adj_close 估值）────────
         nav_val = ledger.nav
@@ -302,6 +322,7 @@ def _replay_days(
                 frozen_tickers=frozen_tickers,
                 sell_only_tickers=sell_only_tickers,
             )
+            active_target_day = day
 
     return records
 
@@ -497,4 +518,7 @@ class RealisticBacktester:
             ),
             risk_free=self.risk_free,
             actual_weights=actual_weights,
+            turnover_by_rebalance=pd.Series(
+                records.turnover_by_rebalance, name="turnover", dtype=float
+            ),
         )

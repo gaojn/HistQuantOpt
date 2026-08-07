@@ -265,6 +265,7 @@ def run_backtest(
         )
         report_path = generate_html_report(
             result, output_path=out_path / "report.html", title=report_title,
+            cache_dir=cache_dir,
         )
         logger.info(f"\n  HTML 报告：{report_path}")
         nav_df = pd.DataFrame({

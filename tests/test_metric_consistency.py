@@ -85,46 +85,22 @@ def test_annual_ir_numerator_is_geometric_not_arithmetic():
     )
 
 
-# ── Calmar：年度与全期统一使用累计收益分子 ───────────────────────
+# ── Calmar：年度与全期统一使用年化收益分子（行业标准 CAGR/MDD） ─────
 
 
-def test_annual_calmar_uses_cumulative_return_not_annualized():
-    """年度 Calmar 分子是累计收益，与分母（同期最大回撤）同期，不年化外推。"""
+def test_annual_calmar_uses_annualized_return():
+    """年度 Calmar 分子是年化收益(CAGR)，与 engine.calc_metrics 同口径。"""
     ret, bm = _series(seed=8, n=60, excess=0.0012)
     r = report_module._annual_metrics(ret, bm, risk_free=RISK_FREE)
 
-    total = (1 + ret).prod() - 1
     nav = (1 + ret).cumprod()
     mdd = float((nav / nav.cummax() - 1).min())
 
-    assert r["calmar"] == pytest.approx(total / (abs(mdd) + 1e-12), rel=1e-12)
+    assert r["calmar"] == pytest.approx(r["annual_return"] / (abs(mdd) + 1e-12), rel=1e-12)
 
 
-def test_short_period_calmar_not_inflated_by_annualization():
-    """不足一年的分组，Calmar 不得被年化外推放大。
-
-    修复前：3 个月样本累计 +8.99% 会外推成年化 +43.55%，Calmar 由 0.15 跳到 5.09。
-    用确定性的正收益序列构造，避免随机序列碰巧为负时断言方向失效。
-    """
-    idx = pd.bdate_range("2024-10-01", periods=60)
-    ret = pd.Series(0.0015, index=idx)
-    ret.iloc[10:15] = -0.01                      # 制造一段回撤，使 mdd 非零
-    bm = pd.Series(0.0002, index=idx)
-
-    r = report_module._annual_metrics(ret, bm, risk_free=RISK_FREE)
-    total = (1 + ret).prod() - 1
-    assert total > 0 and r["max_dd"] < 0
-
-    # 分子就是这 60 天的累计收益本身，没有被 252/60 倍外推
-    assert r["calmar"] * abs(r["max_dd"]) == pytest.approx(total, abs=1e-9)
-
-    annualized_total = (1 + total) ** (252 / 60) - 1
-    assert annualized_total > total * 3           # 外推确实会大幅放大
-    assert r["calmar"] < annualized_total / abs(r["max_dd"])
-
-
-def test_full_period_calmar_uses_cumulative_return_in_engine():
-    """全期 Calmar 也必须是累计收益/同期最大回撤，不得用 CAGR。"""
+def test_full_period_calmar_uses_annualized_return_in_engine():
+    """全期 Calmar 必须是年化收益(CAGR)/同期最大回撤，不得用累计收益。"""
     ret, bm = _series(seed=10, n=60, excess=0.0008)
 
     e = calc_metrics(ret, bm, RISK_FREE)
@@ -132,14 +108,14 @@ def test_full_period_calmar_uses_cumulative_return_in_engine():
     nav = (1 + ret).cumprod()
     mdd = float((nav / nav.cummax() - 1).min())
 
-    assert e.calmar == pytest.approx(total / (abs(mdd) + 1e-12), rel=1e-12)
+    assert e.calmar == pytest.approx(e.annual_return / (abs(mdd) + 1e-12), rel=1e-12)
     assert e.calmar != pytest.approx(
-        e.annual_return / (abs(mdd) + 1e-12), rel=1e-6
+        total / (abs(mdd) + 1e-12), rel=1e-6
     )
 
 
-def test_full_period_excess_calmar_uses_cumulative_geometric_excess():
-    """超额 Calmar 同样使用全期累计几何超额，不得混入年化分子。"""
+def test_full_period_excess_calmar_uses_annualized_excess():
+    """超额 Calmar 同样使用年化几何超额，不得混入累计分子。"""
     ret, bm = _series(seed=11, n=60, excess=0.0010)
     e = calc_metrics(ret, bm, RISK_FREE)
 
@@ -150,8 +126,8 @@ def test_full_period_excess_calmar_uses_cumulative_geometric_excess():
     exc_mdd = float((exc_nav / exc_nav.cummax() - 1).min())
 
     assert e.excess_calmar == pytest.approx(
-        total_exc / (abs(exc_mdd) + 1e-12), rel=1e-12
+        e.annual_excess_return / (abs(exc_mdd) + 1e-12), rel=1e-12
     )
     assert e.excess_calmar != pytest.approx(
-        e.annual_excess_return / (abs(exc_mdd) + 1e-12), rel=1e-6
+        total_exc / (abs(exc_mdd) + 1e-12), rel=1e-6
     )

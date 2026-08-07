@@ -1,0 +1,45 @@
+{
+  "benchmark_metrics": {
+    "annual_return": 0.1559770394240907,
+    "annual_vol": 0.05860889229354929,
+    "max_drawdown": -0.012642924665127175
+  },
+  "execution": {
+    "avg_cash_pct": 0.08183757542505062,
+    "buy_fail_count": 3,
+    "delisted_stuck_count": 3,
+    "expired_notional": 619724.2542382386,
+    "expired_order_count": 1,
+    "final_cash_pct": 0.0,
+    "sell_defer_count": 1,
+    "stale_value_pct": 0.2328989058283517
+  },
+  "metrics": {
+    "annual_excess_return": -0.17199607135728812,
+    "annual_return": -0.042846469936081766,
+    "annual_vol": 0.09010991528551182,
+    "avg_monthly_excess": -0.015035593370148795,
+    "calmar": -1.5429064125919032,
+    "excess_calmar": -2.001012669909912,
+    "excess_max_drawdown": -0.08595451390271835,
+    "info_ratio": -2.1121584814839447,
+    "max_drawdown": -0.027769973334002662,
+    "sharpe": -0.6609907594589209,
+    "tracking_error": 0.08143142328710874,
+    "win_rate_monthly": 0.0
+  },
+  "series": {
+    "bm_nav_last": 1.0714596320014607,
+    "excess_nav_digest": "2759c142236c6f4fe7be3786c1aec5582ee77fd453c1dd487bf798111698105d",
+    "excess_nav_last": 0.9140454860972822,
+    "n_days": 120,
+    "n_fill_days": 10,
+    "n_rebalance_periods": 6,
+    "nav_digest": "c8cb99489df7007f233de81a8198c3690338a8ab42156043cdebf09292ec885f",
+    "nav_first": 1.0,
+    "nav_last": 0.9793628401663902,
+    "turnover_by_rebalance_mean": 1.0703280881120094,
+    "turnover_by_rebalance_sum": 6.421968528672057,
+    "turnover_fill_day_mean": 0.6421968528672057
+  }
+}
