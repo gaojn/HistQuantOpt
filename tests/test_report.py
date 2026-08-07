@@ -151,9 +151,10 @@ def _fake_panel(target_date) -> pl.DataFrame:
 
 
 def _result_with_holdings() -> BacktestResult:
+    """用 target_weights（优化器目标，非执行后的 actual_weights）构造持仓。"""
     result = _result()
     idx = pd.to_datetime(["2020-03-31", "2020-09-30"])
-    result.actual_weights = pd.DataFrame(
+    result.target_weights = pd.DataFrame(
         {
             "SZ000001": [0.30, 0.40],
             "SZ000002": [0.30, 0.35],
@@ -165,13 +166,50 @@ def _result_with_holdings() -> BacktestResult:
     return result
 
 
-def test_build_holdings_table_empty_without_actual_weights():
+def _fake_alpha_panel(*args, **kwargs) -> pd.DataFrame:
+    """模拟 load_alpha_panel：覆盖最后一期日期(09-30)与更早一期(08-15，测 as-of)。"""
+    idx = pd.to_datetime(["2020-08-15", "2020-09-30"])
+    return pd.DataFrame(
+        {
+            "SZ000001": [0.5, 1.234],
+            "SZ000002": [0.1, -0.567],
+            "SZ000003": [0.2, 0.089],
+        },
+        index=idx,
+    )
+
+
+def test_build_holdings_table_empty_without_target_weights():
     html, df = _build_holdings_table(_result())
     assert html == ""
     assert df is None
 
 
-def test_build_holdings_table_joins_name_industry_market_cap(monkeypatch):
+def test_build_holdings_table_joins_name_industry_market_cap_alpha(monkeypatch):
+    monkeypatch.setattr(
+        report_module, "load_panel", lambda t1, t2, columns, cache_dir=None: _fake_panel(t1)
+    )
+    monkeypatch.setattr(report_module, "load_alpha_panel", _fake_alpha_panel)
+    result = _result_with_holdings()
+
+    html, df = _build_holdings_table(result, alpha_path="fake.parquet")
+
+    assert "2020-09-30" in html
+    assert "平安银行" in html and "银行" in html
+    assert "150.0" in html          # 万科A 总市值 1,500,000万 = 150.0亿
+    assert "SZ000004" not in html   # 权重≈0 被过滤
+    assert "1.2340" in html         # 平安银行当期(09-30) alpha
+
+    assert df is not None
+    assert set(df["code"]) == {"SZ000001", "SZ000002", "SZ000003"}
+    row = df.set_index("code").loc["SZ000002"]
+    assert row["weight"] == pytest.approx(0.35)
+    assert row["mv_yi"] == pytest.approx(150.0)
+    assert row["alpha"] == pytest.approx(-0.567)
+
+
+def test_build_holdings_table_alpha_dash_without_alpha_path(monkeypatch):
+    """未提供 alpha_path 时 Alpha 列全部显示—，不报错。"""
     monkeypatch.setattr(
         report_module, "load_panel", lambda t1, t2, columns, cache_dir=None: _fake_panel(t1)
     )
@@ -179,30 +217,25 @@ def test_build_holdings_table_joins_name_industry_market_cap(monkeypatch):
 
     html, df = _build_holdings_table(result)
 
-    assert "2020-09-30" in html
-    assert "平安银行" in html and "银行" in html
-    assert "150.0" in html          # 万科A 总市值 1,500,000万 = 150.0亿
-    assert "SZ000004" not in html   # 权重≈0 被过滤
-
-    assert df is not None
-    assert set(df["code"]) == {"SZ000001", "SZ000002", "SZ000003"}
-    row = df.set_index("code").loc["SZ000002"]
-    assert row["weight"] == pytest.approx(0.35)
-    assert row["mv_yi"] == pytest.approx(150.0)
+    assert df["alpha"].isna().all()
+    assert "<td>—</td>\n        </tr>" in html
 
 
 def test_generate_html_report_includes_holdings_section(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         report_module, "load_panel", lambda t1, t2, columns, cache_dir=None: _fake_panel(t1)
     )
+    monkeypatch.setattr(report_module, "load_alpha_panel", _fake_alpha_panel)
     result = _result_with_holdings()
     out = tmp_path / "report.html"
 
-    generate_html_report(result, output_path=out, title="测试报告")
+    generate_html_report(result, output_path=out, title="测试报告", alpha_path="fake.parquet")
 
     html = out.read_text(encoding="utf-8")
-    assert "最后一期持仓明细（2020-09-30）" in html
+    assert "最后一期优化器目标持仓（2020-09-30）" in html
     assert "万科A" in html
+    assert "Alpha值" in html
 
     holdings = pd.read_parquet(tmp_path / "report_data" / "holdings.parquet")
     assert set(holdings["code"]) == {"SZ000001", "SZ000002", "SZ000003"}
+    assert "alpha" in holdings.columns

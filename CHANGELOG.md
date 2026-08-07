@@ -9,18 +9,27 @@
 
 ## 未发布（工作区，2026-07-29）
 
-### 新增：报告增加"最后一期持仓明细"表
+### 新增：报告增加"最后一期优化器目标持仓"表
 
-`backtest/report.py`（`_build_holdings_table`，`generate_html_report` 新增 `cache_dir` 参数）
+`backtest/engine.py`（`BacktestResult` 新增 `target_weights` 字段）、
+`backtest/report.py`（`_build_holdings_table`，`generate_html_report` 新增
+`cache_dir`/`alpha_path` 参数）、`backtest/run.py`（`run_backtest` 新增 `alpha_path`
+参数）、`cli.py`（`hqopt run` 自动透传 config 的 `alpha.path`；`hqopt backtest` 新增
+`--alpha-path` 可选项）
 
-`report.html` 末尾新增一节，展示最后一个交易日收盘的实际持仓：代码/名称/行业(中信一级)/
-权重/总市值(亿元)，按权重降序，权重≈0 的仓位不显示。名称/行业/市值取自本地行情缓存
-（`hqopt.io.data_panel.load_panel`）在该交易日的截面，天然 as-of、无前视风险；当日缓存
-缺行的股票（如退市滞留仓）显示"—"。同步落盘 `report_data/holdings.parquet`。
+`report.html` 末尾新增一节，展示最后一个**调仓日**的优化器目标持仓：代码/名称/
+总市值(亿元)/行业(中信一级)/权重/Alpha值，按权重降序，权重≈0 的仓位不显示。数据源是
+`target_weights`（优化器原始目标权重，未经撮合/涨跌停/停牌调整），不是执行后的
+`actual_weights`——两者在被阻断的调仓期会不同，报告展示的是"优化器本来想要什么"。
+名称/行业/市值取自本地行情缓存（`hqopt.io.data_panel.load_panel`）在该调仓日的截面，
+天然 as-of、无前视风险；Alpha 列同样按"≤该调仓日最近一次信号"的 as-of 规则取值（与
+`pipeline.universe.get_alpha_for_date` 口径一致），展示原始值，不做截面标准化；
+`alpha_path` 未提供时该列显示"—"。当日行情缓存缺行的股票（如退市滞留仓）名称/行业/
+市值显示"—"。同步落盘 `report_data/holdings.parquet`。
 
 - **影响**：仅报告展示与新增产物文件，不影响净值/权重/绩效指标。
-- **需重跑**：无需重跑优化或回测，重新生成报告即可（`hqopt backtest` 或
-  `generate_html_report`）。
+- **需重跑**：无需重跑优化或回测，重新生成报告即可（`hqopt backtest --alpha-path ...`
+  或 `generate_html_report(..., alpha_path=...)`）。
 
 ### 新增：目标换手落盘，并区分现金重投与股票间调仓
 

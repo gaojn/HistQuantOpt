@@ -210,6 +210,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         "risk_free": 0.02 if rf is None else rf,
         "initial_value": args.initial_value,
         "output_dir": str(Path(out_dir).expanduser().resolve()),
+        "alpha_path": args.alpha_path,
     }
     recorder = _start_standalone_manifest(
         args,
@@ -222,6 +223,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             args.weights, args.start, args.end, index=args.index,
             cost_buy=args.cost_buy, cost_sell=args.cost_sell,
             initial_value=args.initial_value, out_dir=out_dir,
+            alpha_path=args.alpha_path,
             **({} if rf is None else {"risk_free": rf}),
         )
         _finish_standalone_manifest(
@@ -273,6 +275,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             out_dir=Path(wpath).parent,
             cache_dir=data_root / "data" / "cache",
             index_close_path=data_root / "data" / "指数收盘价信息.csv",
+            alpha_path=cfg.get("alpha", {}).get("path"),
         )
         _finish_run_manifest(recorder, cfg, include_backtest=True)
     except Exception as exc:
@@ -390,6 +393,8 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--initial-value", type=float, default=1e8)
     pb.add_argument("--risk-free", type=float, default=None,
                     help="年化无风险利率（Sharpe 用），不传时默认 0.02")
+    pb.add_argument("--alpha-path", default=None,
+                    help="报告最后一期目标持仓表 Alpha 列用的 alpha parquet 路径，不传则该列显示—")
     pb.set_defaults(func=cmd_backtest)
 
     pa = sub.add_parser("attribute", help="权重→收益归因（风格/行业/Country/特质分解）")

@@ -145,6 +145,7 @@ def run_backtest(
     title: str | None = None,
     cache_dir: str | Path | None = None,
     index_close_path: str | Path | None = None,
+    alpha_path: str | Path | None = None,
 ) -> tuple:
     """
     加载权重文件，执行 T+1 VWAP 真实回测，生成 HTML 报告。
@@ -161,6 +162,8 @@ def run_backtest(
     title       : 报告标题，None 自动生成
     cache_dir   : 行情 parquet 缓存目录，None 用默认
     index_close_path : 指数收盘价 CSV 路径，None 用默认
+    alpha_path  : 报告"最后一期目标持仓"表 Alpha 列用的 alpha parquet 路径，
+                  None 时该列显示"—"
 
     Returns
     -------
@@ -265,7 +268,7 @@ def run_backtest(
         )
         report_path = generate_html_report(
             result, output_path=out_path / "report.html", title=report_title,
-            cache_dir=cache_dir,
+            cache_dir=cache_dir, alpha_path=alpha_path,
         )
         logger.info(f"\n  HTML 报告：{report_path}")
         nav_df = pd.DataFrame({

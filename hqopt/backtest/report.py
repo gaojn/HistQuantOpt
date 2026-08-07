@@ -24,6 +24,7 @@ from plotly.subplots import make_subplots
 
 from hqopt.backtest.engine import BacktestResult
 from hqopt.io.data_panel import load_panel
+from hqopt.pipeline.universe import load_alpha_panel
 
 # 换手一节的主色（柱状图与指标卡片左边框共用，保持同组视觉一致）
 _TURNOVER_COLOR = "#c0392b"
@@ -412,16 +413,37 @@ def _build_yearly_table(result: BacktestResult) -> str:
     return html
 
 
-def _build_holdings_table(
-    result: BacktestResult, cache_dir: Path | str | None = None
-) -> tuple[str, pd.DataFrame | None]:
-    """最后一期实际持仓明细：代码/名称/行业/权重/总市值。
-
-    取 ``actual_weights`` 最后一行对应交易日的截面（as-of 当日，无前视风险），
-    与本地行情缓存的 name/industry_l1/total_mv 按 code 关联。缓存当日缺行的
-    股票（如退市滞留仓）显示"—"而不报错。``actual_weights`` 缺失时返回空表。
+def _load_last_alpha_slice(
+    alpha_path: Path | str | None, target_date, codes: pd.Index
+) -> pd.Series:
+    """取 ``target_date`` 当期 alpha 值，取 ≤ target_date 最近一次信号（与优化器
+    ``get_alpha_for_date`` 的 as-of 口径一致，不引入前视）。展示原始值，不做
+    优化器内部可能的截面标准化。``alpha_path`` 为空或该期无信号时全部为 NaN。
     """
-    weights = result.actual_weights
+    empty = pd.Series(np.nan, index=codes)
+    if alpha_path is None:
+        return empty
+    alpha_df = load_alpha_panel(alpha_path)
+    avail = alpha_df.index[alpha_df.index <= pd.Timestamp(target_date)]
+    if len(avail) == 0:
+        return empty
+    return alpha_df.loc[avail[-1]].reindex(codes)
+
+
+def _build_holdings_table(
+    result: BacktestResult,
+    cache_dir: Path | str | None = None,
+    alpha_path: Path | str | None = None,
+) -> tuple[str, pd.DataFrame | None]:
+    """最后一期优化器目标持仓：代码/名称/市值/行业/权重/Alpha值。
+
+    取 ``target_weights``（优化器原始目标权重，未经撮合/涨跌停/停牌调整，区别于
+    执行后的 ``actual_weights``）最后一行对应调仓日的截面，与本地行情缓存的
+    name/industry_l1/total_mv 按 code 关联；``alpha_path`` 提供时同步关联当期
+    alpha 原始值。行情缓存当日缺行的股票（如退市滞留仓）显示"—"而不报错。
+    ``target_weights`` 缺失时返回空表。
+    """
+    weights = result.target_weights
     if weights is None or weights.empty:
         return "", None
 
@@ -442,10 +464,12 @@ def _build_holdings_table(
     df["name"] = panel["name"].reindex(df.index).fillna("—")
     df["industry"] = panel["industry_l1"].reindex(df.index).fillna("—")
     df["mv_yi"] = panel["total_mv"].reindex(df.index) / 1e4   # 万元 → 亿元
+    df["alpha"] = _load_last_alpha_slice(alpha_path, target_date, df.index)
 
     rows = []
     for rank, (code, r) in enumerate(df.iterrows(), start=1):
         mv_str = f"{r['mv_yi']:.1f}" if pd.notna(r["mv_yi"]) else "—"
+        alpha_str = f"{r['alpha']:.4f}" if pd.notna(r["alpha"]) else "—"
         rows.append(f"""
         <tr>
             <td>{rank}</td>
@@ -454,17 +478,19 @@ def _build_holdings_table(
             <td>{mv_str}</td>
             <td>{escape(str(r['industry']))}</td>
             <td>{r['weight']*100:.2f}%</td>
+            <td>{alpha_str}</td>
         </tr>
         """)
 
     html = f"""
     <p style="font-size:11px; color:#7f8c8d; margin:4px 0 4px 0">
-    截止 {target_date:%Y-%m-%d} 收盘的实际持仓（现金与权重≈0 的仓位不显示），
-    名称/行业/市值取自当日行情缓存截面。
+    截止 {target_date:%Y-%m-%d} 的优化器目标持仓（现金与权重≈0 的仓位不显示，
+    未经撮合/涨跌停/停牌调整，与实际成交持仓可能有差异）。名称/行业/市值取自
+    当日行情缓存截面；Alpha 为该期信号原始值（≤当日最近一次，未做截面标准化）。
     </p>
     <table class="stats-table">
         <thead><tr>
-            <th>排名</th><th>代码</th><th>名称</th><th>总市值(亿元)</th><th>行业</th><th>权重</th>
+            <th>排名</th><th>代码</th><th>名称</th><th>总市值(亿元)</th><th>行业</th><th>权重</th><th>Alpha值</th>
         </tr></thead>
         <tbody>{''.join(rows)}</tbody>
     </table>
@@ -605,7 +631,7 @@ def _save_report_data(
       - metrics.parquet    : 总体绩效（组合 vs 基准）
       - yearly.parquet     : 年度分解表
       - monthly_excess.parquet : 月度超额（组合/基准/超额）
-      - holdings.parquet   : 最后一期持仓明细（代码/名称/行业/权重/市值），无持仓数据时不写
+      - holdings.parquet   : 最后一期优化器目标持仓（代码/名称/行业/权重/市值/alpha），无持仓数据时不写
     """
     base = output_path.parent / f"{output_path.stem}_data"
     base.mkdir(parents=True, exist_ok=True)
@@ -763,6 +789,7 @@ def generate_html_report(
     subtitle: str | None = None,
     warning_banner: str | None = None,
     cache_dir: Path | str | None = None,
+    alpha_path: Path | str | None = None,
 ) -> Path:
     """
     生成回测 HTML 报告。
@@ -782,6 +809,9 @@ def generate_html_report(
     cache_dir : Path | str | None
         最后一期持仓明细表用到的行情 parquet 缓存目录，None 用默认路径。
         与 ``run_backtest`` 的 ``cache_dir`` 应保持一致。
+    alpha_path : Path | str | None
+        最后一期持仓明细表 Alpha 列用到的 alpha parquet 路径（与优化时的
+        ``alpha.path`` 一致）。None 时该列全部显示"—"。
 
     Returns
     -------
@@ -805,17 +835,19 @@ def generate_html_report(
     monthly_table   = _build_monthly_excess_table(result)
     turnover_chart  = _make_turnover_chart(result)
     turnover_card   = _build_turnover_card(result)
-    holdings_html, holdings_df = _build_holdings_table(result, cache_dir=cache_dir)
+    holdings_html, holdings_df = _build_holdings_table(
+        result, cache_dir=cache_dir, alpha_path=alpha_path
+    )
     holdings_date = (
-        result.actual_weights.index[-1]
-        if result.actual_weights is not None and not result.actual_weights.empty
+        result.target_weights.index[-1]
+        if result.target_weights is not None and not result.target_weights.empty
         else None
     )
     holdings_section = ""
     if holdings_html:
         holdings_section = f"""
     <div class="section">
-      <h2>最后一期持仓明细（{holdings_date:%Y-%m-%d}）</h2>
+      <h2>最后一期优化器目标持仓（{holdings_date:%Y-%m-%d}）</h2>
       {holdings_html}
     </div>
 """

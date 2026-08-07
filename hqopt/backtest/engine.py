@@ -69,6 +69,9 @@ class BacktestResult:
     # 成交合并成一行。凡是「每期换手」「调仓次数」语义的口径都必须用它，
     # 而不是 turnover——后者按成交日计，分母会偏大、平均换手被系统性低估。
     turnover_by_rebalance: pd.Series | None = None
+    # 优化器目标权重矩阵（index=调仓日，columns=股票代码），未经撮合/涨跌停/
+    # 停牌调整的原始目标——区别于 actual_weights（执行撮合后的每日实际持仓）。
+    target_weights: pd.DataFrame | None = None
 
     @property
     def rebalance_turnover(self) -> pd.Series:
@@ -479,7 +482,9 @@ class RealisticBacktester:
             ledger, frames, weight_df, sell_only_df, set(rebal_dates)
         )
 
-        result = self._build_result(records, frames, adj_close, benchmark_ret, initial_value)
+        result = self._build_result(
+            records, frames, adj_close, benchmark_ret, initial_value, weight_df
+        )
         stuck_count, stuck_value = _stale_holding_value(ledger, frames)
         exec_stats = _build_exec_stats(
             ledger, records, stuck_count, stuck_value,
@@ -494,6 +499,7 @@ class RealisticBacktester:
         adj_close: pd.DataFrame,
         benchmark_ret: pd.Series | None,
         initial_value: float,
+        weight_df: pd.DataFrame,
     ) -> BacktestResult:
         """由逐日重放记录计算净值、超额与绩效指标。"""
         nav      = records.port_values / initial_value
@@ -521,4 +527,5 @@ class RealisticBacktester:
             turnover_by_rebalance=pd.Series(
                 records.turnover_by_rebalance, name="turnover", dtype=float
             ),
+            target_weights=weight_df,
         )
