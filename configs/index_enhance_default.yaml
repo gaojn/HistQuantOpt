@@ -20,6 +20,11 @@ universe:
   exclude_bj: true          # 剔除北交所
   exclude_st: true          # 剔除 ST/*ST
   top_n: null               # 候选池为 HS300+ZZ500+ZZ1000，不再截断
+  alpha_top_m: null         # 候选池瘦身：优化域缩至 alpha top-M ∪ 持仓 ∪ 基准股 ∪ 成分股容量
+                            # ∪ 风格载荷两端极值票（对冲候选，紧风格约束下必须保留）。
+                            # 实测 M=1000（池约 2400~2800 只）解与全池逐票一致（L1 差 ~1e-4，
+                            # 求解器噪声级），逐期求解提速 2~5 倍；null=关闭。
+                            # 建议先影子验证（对比全池 weights.parquet）再上生产
   new_listing_days: 120     # 次新股：上市不足此自然日数禁止持仓（list_days < 该值）
 
 optimizer:

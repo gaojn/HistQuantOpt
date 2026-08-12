@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 # 未列出且无 default 时，用极大值表示"不约束"（避免 cvxpy 的 inf 问题）
 UNBOUNDED = 1e6
 
-# 求解器参数：CLARABEL 为主（max_iter 提至 500 应对大规模候选池），SCS 兜底
+# 求解器参数：PIQP 为主（纯 QP 求解器，全市场规模实测比 CLARABEL 快 3~4 倍），
+# CLARABEL 次之（锥求解器，兜住 te_upper/vol_upper 的二次硬约束），SCS 兜底。
+# PIQP 精度取 1e-7：求解后硬约束门禁为 1e-5，留两个量级余量。
+_PIQP_EPS = 1e-7
 _CLARABEL_MAX_ITER = 500
 _SCS_MAX_ITERS = 10000
 _OPTIMAL_STATUSES = ("optimal", "optimal_inaccurate")
@@ -342,14 +345,27 @@ def turnover_terms(
 
 
 def solve_with_fallback(problem: cp.Problem) -> str | None:
-    """先 CLARABEL 后 SCS 求解。
+    """PIQP → CLARABEL → SCS 三级降级求解。
+
+    PIQP 是纯 QP 求解器：默认软惩罚配置（二次目标 + 线性约束）走它最快；
+    ``te_upper`` / ``vol_upper`` 模式引入二次硬约束时 cvxpy 会抛
+    ``SolverError``，自动落到 CLARABEL——语义不变，只是变慢。
 
     Returns
     -------
     str | None
-        两个求解器都抛异常时返回失败原因字符串，否则返回 None（此时用
+        全部求解器都抛异常时返回失败原因字符串，否则返回 None（此时用
         ``problem.status`` 判断是否取到最优解）。
     """
+    try:
+        problem.solve(
+            solver=cp.PIQP, eps_abs=_PIQP_EPS, eps_rel=_PIQP_EPS, verbose=False
+        )
+        if problem.status in _OPTIMAL_STATUSES:
+            return None
+    except Exception:  # noqa: BLE001 - 二次约束/未安装/求解异常，一律降级重试
+        pass
+
     try:
         problem.solve(solver=cp.CLARABEL, max_iter=_CLARABEL_MAX_ITER, verbose=False)
         if problem.status in _OPTIMAL_STATUSES:
@@ -360,7 +376,7 @@ def solve_with_fallback(problem: cp.Problem) -> str | None:
     try:
         problem.solve(solver=cp.SCS, max_iters=_SCS_MAX_ITERS, verbose=False)
     except Exception as exc:  # noqa: BLE001
-        return f"both solvers failed: {exc}"
+        return f"all solvers failed: {exc}"
     return None
 
 

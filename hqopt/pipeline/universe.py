@@ -151,9 +151,10 @@ def filter_universe(
 
     # sell_only：carry 票标 True，正常候选票标 False；无 carry 时为 None（兼容旧行为）
     if carry:
-        sell_only: pd.Series | None = pd.Series(False, index=all_tickers, dtype=bool)
+        carry_flags = pd.Series(False, index=all_tickers, dtype=bool)
         for t in carry:
-            sell_only[t] = True
+            carry_flags[t] = True
+        sell_only: pd.Series | None = carry_flags
     else:
         sell_only = None
 
@@ -170,6 +171,84 @@ def filter_universe(
             if snapshot.is_constituent is not None else None
         ),
         sell_only=sell_only,
+    )
+
+
+# 风格对冲候选：每个风格因子正/负载荷两端各保留的股票数。
+# 60 只 × weight_upper 1~5% 提供 0.6~3.0 的单因子暴露调节容量，
+# 远超 ±0.2σ~±0.6σ 约束所需；实测该值下瘦身解与全池解逐票一致。
+_STYLE_HEDGE_PER_TAIL = 60
+
+
+def candidate_pool_mask(
+    alpha: np.ndarray,
+    snapshot: MarketSnapshot,
+    prev_weight: np.ndarray | None,
+    benchmark_weight: np.ndarray | None,
+    top_m: int,
+    style_loading: pd.DataFrame | None = None,
+) -> np.ndarray:
+    """候选池瘦身掩码：alpha top-M ∪ 约束相关股票。
+
+    纯多头 + 线性 alpha + 凸惩罚下，深度负 alpha 的股票不会进入最优解的
+    支撑集；但**约束相关**股票即使 alpha 平庸也可能被最优解选中，必须
+    显式保留，否则瘦身会悄悄改变问题：
+
+    - 当前持仓：卖出/冻结/只卖约束都挂在它身上；
+    - 基准权重非零（指增）：主动偏离与成分下限约束才有意义；
+    - 成分股按 alpha 取前 ``0.6·M``：保证 ``min_constituent_ratio`` 有充足
+      容量（0.6M × weight_upper 远大于 40%/80% 下限）；
+    - 风格载荷两端极值股票：绝对风格约束（如 Size ≤ ±0.2σ）是紧约束时，
+      最优解会持有 alpha 排名靠后的「对冲票」把组合暴露拉回界内——实测
+      漏掉它们会造成 ~4% 权重、0.16 L1 的解漂移。
+
+    注意：传入的 ``alpha`` 应是全池截面 z-score；**瘦身后不要重新标准化**——
+    重新标准化会改变 alpha 与风险/换手惩罚的量纲耦合，破坏与全池解的等价性。
+    """
+    if top_m <= 0:
+        raise ValueError(f"top_m 必须为正，收到 {top_m}")
+    rank = pd.Series(alpha).rank(ascending=False, method="first").values
+    keep = rank <= top_m
+    if prev_weight is not None:
+        keep |= np.asarray(prev_weight, dtype=float) > 1e-12
+    if benchmark_weight is not None:
+        keep |= np.asarray(benchmark_weight, dtype=float) > 1e-10
+    cmask = snapshot.constituent_mask
+    if cmask.any() and not cmask.all():
+        const_rank = (
+            pd.Series(np.where(cmask, alpha, -np.inf))
+            .rank(ascending=False, method="first")
+            .values
+        )
+        keep |= (const_rank <= int(top_m * 0.6)) & cmask
+    if style_loading is not None:
+        loadings = style_loading.reindex(snapshot.tickers).fillna(0.0)
+        for column in loadings.columns:
+            order = np.argsort(loadings[column].values)
+            keep[order[:_STYLE_HEDGE_PER_TAIL]] = True
+            keep[order[-_STYLE_HEDGE_PER_TAIL:]] = True
+    return keep
+
+
+def subset_snapshot(snapshot: MarketSnapshot, keep_idx: np.ndarray) -> MarketSnapshot:
+    """按位置索引切取快照子集（保持原有顺序，全部字段按 ticker 重对齐）。"""
+    keep_tickers = [snapshot.tickers[i] for i in keep_idx]
+    return replace(
+        snapshot,
+        tickers=keep_tickers,
+        industry=snapshot.industry.reindex(keep_tickers),
+        adv=snapshot.adv.reindex(keep_tickers),
+        status=snapshot.status.reindex(keep_tickers),
+        prev_weight=snapshot.prev_weight.reindex(keep_tickers).fillna(0.0),
+        market_cap=snapshot.market_cap.reindex(keep_tickers),
+        is_constituent=(
+            snapshot.is_constituent.reindex(keep_tickers)
+            if snapshot.is_constituent is not None else None
+        ),
+        sell_only=(
+            snapshot.sell_only.reindex(keep_tickers).fillna(False)
+            if snapshot.sell_only is not None else None
+        ),
     )
 
 

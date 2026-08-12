@@ -7,6 +7,32 @@
 
 ---
 
+## 未发布（工作区，2026-08-12）
+
+### 性能：求解降级链改为 PIQP → CLARABEL → SCS；新增候选池瘦身配置
+
+`optimizer/_common.py`（`solve_with_fallback` 三级降级，PIQP eps=1e-7）、
+`pipeline/universe.py`（新增 `candidate_pool_mask` / `subset_snapshot`）、
+`pipeline/batch/periods.py`（新增 `_reduce_candidate_pool`；冲击成本向量改为
+瘦身前在全池上计算后切片，避免中位数归一化口径随池漂移）、
+`configs/*.yaml`（新增 `universe.alpha_top_m`，默认 null=关闭）、
+`pyproject.toml`（新增依赖 `piqp>=0.6`）。
+
+- **求解器**：默认软惩罚配置（二次目标+线性约束）由 PIQP 求解，全市场规模
+  （N≈5000）实测比 CLARABEL 快 3~4 倍；`te_upper`/`vol_upper` 二次硬约束模式
+  cvxpy 对 PIQP 抛 SolverError，自动降级 CLARABEL，语义不变。求解后 1e-5
+  硬约束门禁对所有求解器继续生效。
+- **候选池瘦身**（`alpha_top_m`，默认关闭）：优化域缩至 alpha top-M ∪ 持仓 ∪
+  基准股 ∪ 成分股容量 ∪ 风格载荷两端极值票（每因子两端各 60 只——绝对风格
+  约束 binding 时最优解含 alpha 平庸的对冲票，漏掉会漂移 ~0.16 L1）。alpha 与
+  成本向量均为全池版本切片、不重算。
+- **影响**：默认配置下（瘦身关闭）与旧版的权重差异为求解器数值噪声
+  （6 个月窗口实测每期 L1 差 ≤ 1.3e-4，均为 optimal，post-solve 违约 0）；
+  开启 `alpha_top_m: 1000` 后同样处于噪声级（≤ 1.3e-4）。绩效指标不受影响，
+  无需重跑历史结果；如需逐位复现旧数字，锁定旧版本即可。
+
+---
+
 ## 未发布（工作区，2026-07-29）
 
 ### 新增：报告增加"最后一期优化器目标持仓"表

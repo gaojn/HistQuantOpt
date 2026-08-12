@@ -330,8 +330,11 @@ def test_signal_day_limits_do_not_constrain_next_day_target(strategy):
         )
 
     assert res.is_feasible
-    assert res.weights[0] > 0.1, "T 日涨停票应允许生成 T+1 买入目标"
-    assert res.weights[1] < prev_w[1] - 0.1, "T 日跌停票应允许生成 T+1 卖出目标"
+    # index_enhance 默认 max_turnover=0.20：买入涨停票与卖出跌停票各占 0.1
+    # 预算，解析最优恰为 w[0]=0.1——断言需容忍求解器在该边界上的数值噪声
+    # （CLARABEL 收敛在 0.1 略上方，PIQP 在略下方，差 ~1e-12）。
+    assert res.weights[0] > 0.1 - 1e-6, "T 日涨停票应允许生成 T+1 买入目标"
+    assert res.weights[1] < prev_w[1] - (0.1 - 1e-6), "T 日跌停票应允许生成 T+1 卖出目标"
 
 
 # ═══════════════════════════════════════════════════════════════
