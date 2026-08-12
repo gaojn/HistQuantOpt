@@ -166,7 +166,7 @@ def collect_repository_state(root: Path = PROJECT_ROOT) -> dict[str, Any]:
 
 
 def _runtime_state() -> dict[str, Any]:
-    packages = {}
+    packages: dict[str, str | None] = {}
     for name in (
         "clarabel",
         "cvxpy",
@@ -272,7 +272,8 @@ class RunManifestRecorder:
             inputs.append(input_record)
             seen_inputs.add(input_path)
 
-        config_record = {
+        # 值既有字符串也有嵌套的 effective 配置字典，故不是 dict[str, str | None]。
+        config_record: dict[str, Any] = {
             "source_path": str(source_config) if source_config is not None else None,
             "source_sha256": (
                 sha256_file(source_config) if source_config is not None else None

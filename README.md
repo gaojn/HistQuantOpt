@@ -46,13 +46,47 @@ python3.14 -m pytest tests/ -q   # 主版本：3.14.6
 python3.12 -m pytest tests/ -q   # 兼容版本
 ```
 
-CI 在 3.14.6 / 3.12 两个版本上跑 `ruff check .` 与带覆盖率门禁的测试：
+CI 在 3.14.6 / 3.12 两个版本上依次跑 lint、类型检查与带覆盖率门禁的测试：
 
 ```bash
 pip install -e ".[dev]"
 ruff check .
-pytest -q --cov=hqopt --cov-fail-under=85
+mypy
+pytest -q --cov=hqopt --cov=scripts --cov-fail-under=82
 ```
 
-Ruff 规则集见 `pyproject.toml` 的 `[tool.ruff.lint]`（E/F/I/B/UP/SIM/C4，
-E501 与另两条规则的豁免理由已在配置里注明）。覆盖率门禁 85%，当前约 89%。
+三道门禁的口径：
+
+| 门禁 | 范围 | 现状 |
+|---|---|---|
+| `ruff check .` | 全仓 | 零告警。规则集 E/F/I/B/UP/SIM/C4，E501 与另两条的豁免理由见 `[tool.ruff.lint]` |
+| `mypy` | `hqopt` + `scripts`（范围写在 `[tool.mypy]`，无需传参） | 零错误，且不依赖任何 `# type: ignore` 兜底 |
+| 覆盖率 | `hqopt` + `scripts` | 门禁 82%，当前约 84% |
+
+覆盖率统计包含 `scripts/`——数据导出脚本同属交付面，其覆盖缺口应当可见。因此
+阈值低于只统计 `hqopt` 时的 85%（彼时约 90%）：这是把现状暴露出来，不是放松要求。
+`scripts/` 目前是薄弱层（`build_alphas_vwap5.py`、`export_index_close.py` 尚无测试），
+补测试后应同步上调阈值。
+
+`[tool.mypy]` 只对 polars 的 `str-bytes-safe` 做了全局豁免（其 `Series.min()/max()`
+stub 返回类型含 `bytes`，而脚本格式化的是日期列，属误报）；`tests/` 不在检查范围内，
+因为测试替身与 duck typing 会产生大量无价值告警。
+
+### Golden 回归基线
+
+`tests/test_golden_backtest.py` 在合成行情上跑完整 `run_backtest`，把绩效指标、
+执行统计与整条净值序列（含 SHA-256）锁到 `tests/golden/backtest_baseline.json`。
+CHANGELOG 里绝大多数 ⚠️ 破坏性变更都落在这条链路上，此测试是它们的哨兵——
+口径一旦变化必然失败，强制显式确认而非静默漂移。
+
+数据由测试自身解析式构造（零随机数、零超越函数），不读 `data/`、不连 ClickHouse，
+并注入停牌、涨停、跌停、退市与 sell-only，确保锚住的是完整执行语义。
+
+口径**有意**变更时重生成基线，并同步在 CHANGELOG 记录影响与需重跑范围：
+
+```bash
+HQOPT_UPDATE_GOLDEN=1 pytest tests/test_golden_backtest.py
+```
+
+未设该环境变量时基线只读，测试绝不会自动改写它。基线里组合收益为负是预期的——
+合成面板不含 alpha，该测试锚定数值口径而非策略表现。

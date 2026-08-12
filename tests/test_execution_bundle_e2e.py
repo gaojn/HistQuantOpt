@@ -292,7 +292,10 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
     assert "收益归因报告" in attribution_report.read_text(encoding="utf-8")
 
     batch_stats = json.loads(stats_path.read_text(encoding="utf-8"))
-    assert batch_stats["optimization"] == {
+    # 目标换手单独校验，其余字段保持精确匹配以锁定 schema。
+    optimization = dict(batch_stats["optimization"])
+    target_turnover = optimization.pop("target_turnover")
+    assert optimization == {
         "candidate_period_count": 6,
         "failed_period_count": 4,
         "successful_period_count": 2,
@@ -304,6 +307,15 @@ def test_real_batch_bundle_replays_identically_in_backtest_and_attribution(
             "max_violation_by_period": {},
         },
     }
+    # 两个成功期中只有第二期有「上期」；该期完全换仓，且上期满仓故 cash_gap=0，
+    # 因此 net == gross。
+    assert target_turnover["by_period"] == {
+        "2024-01-04": {"gross": 2.0, "cash_gap": 0.0, "net": 2.0},
+    }
+    assert target_turnover["gross_mean"] == pytest.approx(2.0)
+    assert target_turnover["net_mean"] == pytest.approx(2.0)
+    assert target_turnover["cash_gap_mean"] == pytest.approx(0.0)
+    assert "max_turnover" in target_turnover["definition"]
     assert batch_stats["alpha_quality"]["skipped_period_count"] == 0
     assert batch_stats["alpha_quality"]["zero_variance_period_count"] == 0
     assert len(batch_stats["alpha_quality"]["as_of_by_period"]) == 6

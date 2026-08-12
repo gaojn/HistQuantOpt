@@ -254,6 +254,7 @@ class IndexEnhanceOptimizer:
             te_var = risk_quadratic_form(
                 w - w_bm, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
             )
+            assert cfg.te_upper is not None      # te_constrained 的定义即此
             constraints.append(te_var <= annualized_variance_cap(cfg.te_upper))
 
         # 目标函数：max w'α - 主动风险惩罚 - λ·Σ c_i|Δw_i|
@@ -332,6 +333,8 @@ class IndexEnhanceOptimizer:
         if te_constrained:
             # 与其他硬约束一视同仁做求解后校验：数值求解可能轻微越界，
             # 超出容差即拒绝发布，避免"声称 TE≤5% 实则更高"的组合流入生产。
+            # te_constrained 蕴含二者非 None（上方构建约束时已校验并报错）。
+            assert risk_snapshot is not None and cfg.te_upper is not None
             realized_te = realized_annual_vol(
                 weights - w_bm,
                 risk_snapshot.X,

@@ -266,17 +266,19 @@ class IndexBenchmarkWeights:
                         and self.max_snapshot_age_days is not None
                         and snapshot_age > self.max_snapshot_age_days
                     ):
-                        fallback_reason = (
+                        # 独立变量名：本分支就地返回，与下方 drift 路径的
+                        # fallback_reason（可为 None）互不影响。
+                        stale_reason = (
                             "snapshot_stale: "
                             f"age_days={snapshot_age}, "
                             f"limit_days={self.max_snapshot_age_days}"
                         )
-                        self._warn_fallback(target_date, fallback_reason)
+                        self._warn_fallback(target_date, stale_reason)
                         self._record_audit(
                             target_date,
                             RECONSTRUCT_SOURCE,
                             anchor,
-                            fallback_reason,
+                            stale_reason,
                         )
                         return self._reconstructed_weights(target_date, tickers)
 

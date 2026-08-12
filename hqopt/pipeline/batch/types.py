@@ -93,7 +93,12 @@ class _RunStats:
 
     fail_count: int = 0
     solve_times: list[float] = field(default_factory=list)
-    target_turnovers: list[float] = field(default_factory=list)
+    # 逐期目标换手，每项 {"gross","cash_gap","net"}。gross 含「上期留存现金买回
+    # 股票」那部分（目标 Σw=1 而实际 Σw_prev<1）；net 扣掉它，才是股票间调仓
+    # 强度，也才与 max_turnover 同口径（约束为 gross ≤ max_turnover + cash_gap）。
+    target_turnover_by_period: dict[str, dict[str, float]] = field(
+        default_factory=dict
+    )
     alpha_stale_periods: int = 0
     alpha_skipped_periods: int = 0
     alpha_zero_variance_periods: int = 0

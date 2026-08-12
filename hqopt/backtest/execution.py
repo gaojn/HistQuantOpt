@@ -357,7 +357,7 @@ def publish_batch_bundle(
             temporary.unlink(missing_ok=True)
 
 
-def _valid_price(value: object) -> float:
+def _valid_price(value: Any) -> float:
     """将有效正价格转为 float，无效值返回 0。"""
     if value is None or pd.isna(value):
         return 0.0
@@ -409,11 +409,11 @@ class ExecutionLedger:
             or max_attempts <= 0
         ):
             raise ValueError("max_attempts 必须为正整数")
-        self.cash = float(initial_value)
-        self.cost_buy = float(cost_buy)
-        self.cost_sell = float(cost_sell)
-        self.min_notional = float(min_notional)
-        self.max_attempts = int(max_attempts)
+        self.cash: float = float(initial_value)
+        self.cost_buy: float = float(cost_buy)
+        self.cost_sell: float = float(cost_sell)
+        self.min_notional: float = float(min_notional)
+        self.max_attempts: int = int(max_attempts)
         self.shares: dict[str, float] = {}
         self.last_price: dict[str, float] = {}
 
@@ -422,12 +422,12 @@ class ExecutionLedger:
         self.frozen_tickers: set[str] = set()
         self.sell_only_tickers: set[str] = set()
         self.order_states: dict[str, OrderState] = {}
-        self.target_attempts = 0
+        self.target_attempts: int = 0
 
-        self.buy_fail_count = 0
-        self.sell_defer_count = 0
-        self.expired_order_count = 0
-        self.expired_notional = 0.0
+        self.buy_fail_count: int = 0
+        self.sell_defer_count: int = 0
+        self.expired_order_count: int = 0
+        self.expired_notional: float = 0.0
 
     def submit_target(
         self,

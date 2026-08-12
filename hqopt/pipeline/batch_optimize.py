@@ -125,7 +125,7 @@ def _build_optimizer(
 ) -> tuple[Any, Any]:
     """按策略构造优化器与其基础配置。"""
     if strategy == "index_enhance":
-        base_config = IndexEnhanceConfig(
+        ie_config = IndexEnhanceConfig(
             weight_upper=float(opt_cfg["weight_upper"]),
             min_constituent_ratio=float(opt_cfg["min_constituent_ratio"]),
             industry_active_bound=float(opt_cfg["industry_active_bound"]),
@@ -138,9 +138,9 @@ def _build_optimizer(
             risk_aversion=risk_aversion,
             te_upper=_optional_float(opt_cfg, "te_upper"),
         )
-        return IndexEnhanceOptimizer(base_config), base_config
+        return IndexEnhanceOptimizer(ie_config), ie_config
 
-    base_config = AlphaMaxConfig(
+    am_config = AlphaMaxConfig(
         weight_upper=float(opt_cfg["weight_upper"]),
         industry_upper=float(opt_cfg.get("industry_upper", 0.20)),
         min_constituent_ratio=float(opt_cfg.get("min_constituent_ratio", 0.0)),
@@ -154,7 +154,7 @@ def _build_optimizer(
         risk_aversion=risk_aversion,
         vol_upper=_optional_float(opt_cfg, "vol_upper"),
     )
-    return AlphaMaxOptimizer(base_config), base_config
+    return AlphaMaxOptimizer(am_config), am_config
 
 
 def _build_risk_model(

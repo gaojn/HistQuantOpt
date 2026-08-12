@@ -21,6 +21,20 @@ from hqopt.pipeline.batch.types import _BatchInputs, _PeriodOutcome
 
 logger = logging.getLogger(__name__)
 
+
+def _target_turnover_summary(stats) -> dict[str, float]:
+    """目标换手的两口径均值。首期无「上期」故不计入。"""
+    records = list(stats.target_turnover_by_period.values())
+    if not records:
+        nan = float("nan")
+        return {"gross_mean": nan, "net_mean": nan, "cash_gap_mean": nan}
+    return {
+        "gross_mean": float(np.mean([r["gross"] for r in records])),
+        "net_mean": float(np.mean([r["net"] for r in records])),
+        "cash_gap_mean": float(np.mean([r["cash_gap"] for r in records])),
+    }
+
+
 def _log_run_summary(weight_df: pd.DataFrame, outcome: _PeriodOutcome) -> None:
     stats = outcome.stats
     logger.info(f"\n{'='*65}\n  批量优化汇总\n{'='*65}")
@@ -37,11 +51,13 @@ def _log_run_summary(weight_df: pd.DataFrame, outcome: _PeriodOutcome) -> None:
             "异常期已按配置告警或跳过，必须结合落盘 alpha_quality 审计业绩"
         )
     logger.info(f"  平均持仓数   : {(weight_df > 1e-6).sum(axis=1).mean():.0f} 只")
-    avg_turnover = (
-        float(np.mean(stats.target_turnovers)) if stats.target_turnovers
-        else float("nan")
+    turnover_summary = _target_turnover_summary(stats)
+    logger.info(
+        f"  平均目标换手 : 净 {turnover_summary['net_mean']*100:.1f}%"
+        f"（股票间调仓，与 max_turnover 同口径）  "
+        f"含现金重投 {turnover_summary['gross_mean']*100:.1f}%"
+        f"（其中现金缺口 {turnover_summary['cash_gap_mean']*100:.1f}%）"
     )
-    logger.info(f"  平均目标换手 : {avg_turnover*100:.1f}%（相对实际持仓）")
     logger.info(
         f"  平均耗时     : {np.mean(stats.solve_times):.2f}s  "
         f"总耗时: {outcome.elapsed:.1f}s"
@@ -81,6 +97,18 @@ def _publish_outputs(inputs: _BatchInputs, outcome: _PeriodOutcome) -> pd.DataFr
             "candidate_period_count": len(inputs.rebal_dates),
             "successful_period_count": len(outcome.weight_records),
             "failed_period_count": outcome.stats.fail_count,
+            "target_turnover": {
+                "definition": (
+                    "双边目标换手。gross=Σ|w_target − w_prev_actual|，w_prev 取自"
+                    "成交账本实际持仓（不含现金，故 Σ<1）；cash_gap=1−Σw_prev 是"
+                    "把留存现金买回股票所必需的买入量；net=gross−cash_gap 为股票间"
+                    "调仓强度，与 max_turnover 约束同口径。首期无上期故不计入。"
+                    "注意这是**目标**换手，与回测实际成交换手"
+                    "（turnover.parquet）因涨跌停/停牌/现金不足而不同。"
+                ),
+                **_target_turnover_summary(outcome.stats),
+                "by_period": outcome.stats.target_turnover_by_period,
+            },
             "post_solve_validation": {
                 "absolute_tolerance": POST_SOLVE_ABS_TOL,
                 "failure_count": outcome.stats.postcheck_failure_count,
