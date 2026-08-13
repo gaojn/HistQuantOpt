@@ -38,6 +38,9 @@ include = ["hqopt*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# projects/ 是实验/报告工作区（bench 脚本、演示产物），不属于交付代码面，
+# 不纳入 lint 门禁；交付面 hqopt/scripts/tests 仍全量检查。
+extend-exclude = ["projects"]
 
 [tool.ruff.lint]
 # 默认只有 E4/E7/E9/F，漏掉 import 排序与一整类真实 bug（如 zip 长度静默截断）。
