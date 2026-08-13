@@ -302,6 +302,25 @@ def test_suspension_row_present_not_treated_as_delist():
     assert sells.iloc[0]["date"] == dates[3]          # 复牌次日顺延卖出
 
 
+def test_no_cash_skip_counted():
+    """现金耗尽（到期桶跌停未回款）时整桶跳过，并计入 no_cash_skip_days。"""
+    dates = pd.bdate_range("2024-01-02", periods=6)
+    frames = _frames(dates, ["A", "B", "C"])
+    # A day1 开盘 10 买入后暴涨到 30 → 总资产/2 超过剩余现金，day2 建仓 B 用光现金
+    frames["adj_close"].loc[dates[1]:, "A"] = 30.0
+    frames["close_raw"].loc[dates[1]:, "A"] = 30.0
+    # A 的到期日 day2 收盘跌停 → 卖不出、现金不回笼
+    frames["limit_down"].loc[dates[2], "A"] = 30.0
+    picks = _picks([(dates[0], "A"), (dates[1], "B"), (dates[2], "C")])
+
+    _, stats, trades = _run(picks, frames, hold_days=2)
+
+    assert stats["no_cash_skip_days"] == 1
+    assert "C" not in set(trades[trades["side"] == "buy"]["code"])
+    # C 不是价格阻断，不应计入 buy_fail
+    assert stats["buy_fail_count"] == 0
+
+
 # ── 输入校验 ─────────────────────────────────────────────────────
 
 

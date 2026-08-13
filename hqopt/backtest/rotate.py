@@ -254,6 +254,8 @@ class RotateBacktester:
         day = frames.dates[i]
         budget = min(state.equity / self.hold_days, state.cash)
         if budget <= 1e-8:
+            # 现金耗尽（如到期桶因跌停/停牌未能回款）→ 本期信号整桶跳过
+            state.no_cash_skip_days += 1
             return 0.0
         alloc = budget / len(codes)
 
@@ -491,6 +493,7 @@ class RotateBacktester:
             "buy_fail_count": state.buy_fail_count,
             "sell_defer_count": state.sell_defer_count,
             "delist_forced_count": state.delist_forced_count,
+            "no_cash_skip_days": state.no_cash_skip_days,
             "unexecutable_signal_days": [
                 day.strftime("%Y-%m-%d") for day in state.unexecutable_signals
             ],
@@ -519,6 +522,7 @@ class _ReplayState:
     buy_fail_count: int = 0
     sell_defer_count: int = 0
     delist_forced_count: int = 0
+    no_cash_skip_days: int = 0
     unexecutable_signals: list = field(default_factory=list)
 
 
