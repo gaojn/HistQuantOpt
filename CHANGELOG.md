@@ -9,6 +9,26 @@
 
 ## 未发布（工作区，2026-08-13）
 
+### 新增：轮动分仓回测 `hqopt rotate`（T日选股→T+1开盘买→T+H收盘卖，资金分H份）
+
+`backtest/rotate.py`（新增 `RotateBacktester`）、`backtest/rotate_run.py`
+（`run_rotate_backtest`：IO/基准/报告编排）、`cli.py`（新增 `rotate` 子命令）、
+`io/run_manifest.py`（`expected_standalone_artifacts` 增加 `rotate` 模式）、
+`scripts/gen_random_picks.py`（随机选股基线信号生成器）。
+
+- **语义**：外部选股列表（`[date, code]` 长表，date=信号日 T，每日 0~任意只）
+  → T+1 复权开盘价买入（桶内等权）→ T+H 复权收盘价卖出；资金分 H 份，
+  每日建仓金额 = min(前收盘总资产/H, 可用现金)，无信号时自然回到全现金。
+- **执行口径**与 `RealisticBacktester` 同容差：开盘涨停/停牌买不进→放弃留
+  现金；收盘跌停/停牌卖不出→顺延下一可交易日；退市（行情整行消失）当日按
+  最近有效价强制核销；现金耗尽整桶跳过。估值 ffill、成交价不 ffill。
+- **审计**：`trades.parquet` 逐笔成交（`sell_deferred`/`sell_delist` 标记）；
+  `execution_stats.json` 含 `buy_fail_breakdown`/`sell_defer_breakdown`
+  （停牌/涨跌停/无行情分列）、`delist_forced_count`、`no_cash_skip_days`。
+- **影响**：纯新增，不改变现有 `run/optimize/backtest/attribute` 任何行为。
+  已用 2020-01~2026-05 全市场随机信号（H=2/3/4/5/6/10 六组）压测：现金流
+  逐笔对账一致、持仓守恒、买入阻断分类与行情面板独立复算完全吻合。
+
 ### 新增：第三种策略 `topn_equal`——Top-N 等权持有（规则式，不走凸优化）
 
 `optimizer/topn_equal.py`（新增 `TopNEqualConfig` / `TopNEqualOptimizer` /

@@ -182,12 +182,15 @@ hqopt/
 │   │                       #   构造时传 query_dates 只加载所需调仓日截面
 │   └── attribution_data.py # 因子收益 f(t) / 个股特质收益 u(t) 加载器（收益归因用）
 ├── optimizer/
-│   ├── _common.py          # 两优化器共用：交易状态掩码/换手项/求解降级/结果基类
+│   ├── _common.py          # 优化器共用：交易状态掩码/换手项/求解降级/结果基类
 │   ├── alpha_max.py        # 量化选股 QP 优化器
-│   └── index_enhance.py    # 指数增强 QP 优化器
+│   ├── index_enhance.py    # 指数增强 QP 优化器
+│   └── topn_equal.py       # Top-N 等权持有（规则式换仓，类 qlib TopkDropout）
 ├── backtest/
 │   ├── engine.py           # 真实执行回测（T+1 VWAP/涨跌停/成本）+ 绩效指标
 │   │                       #   run() = 对齐 → _replay_days 逐日重放 → 指标/统计
+│   ├── rotate.py           # 轮动分仓回测（T日选股→T+1开盘买→T+H收盘卖，资金分H份）
+│   ├── rotate_run.py       # 选股列表→轮动回测→报告编排，供 hqopt rotate 复用
 │   └── report.py           # Plotly HTML 报告
 ├── analysis/
 │   ├── attribution.py      # 收益归因（风格/行业/Country/特质分解，Carino多期链接）
