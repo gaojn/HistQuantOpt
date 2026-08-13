@@ -405,6 +405,20 @@ def expected_standalone_artifacts(
             "report_data/yearly.parquet",
             "report_data/monthly_excess.parquet",
         ]
+    elif mode == "rotate":
+        relative_paths = [
+            "report.html",
+            "nav.parquet",
+            "turnover.parquet",
+            "actual_weights.parquet",
+            "trades.parquet",
+            "execution_stats.json",
+            "report_data/timeseries.parquet",
+            "report_data/turnover.parquet",
+            "report_data/metrics.parquet",
+            "report_data/yearly.parquet",
+            "report_data/monthly_excess.parquet",
+        ]
     elif mode == "attribute":
         relative_paths = [
             "attribution_report.html",

@@ -1,6 +1,6 @@
 # HistQuantOpt
 
-A股多因子组合优化框架：基于 Barra CNE6 风险模型，输出「Alpha → 优化 → 真实回测（T+1 VWAP / 涨跌停 / 停牌 / 非对称费率）→ HTML 报告」的完整闭环，支持**量化选股**（`alpha_max`）、**指数增强**（`index_enhance`）与 **Top-N 等权持有**（`topn_equal`，规则式换仓 + 换手上限 + 免交易带，类 qlib TopkDropout）三条策略流水线。
+A股多因子组合优化框架：基于 Barra CNE6 风险模型，输出「Alpha → 优化 → 真实回测（T+1 VWAP / 涨跌停 / 停牌 / 非对称费率）→ HTML 报告」的完整闭环，支持**量化选股**（`alpha_max`）、**指数增强**（`index_enhance`）与 **Top-N 等权持有**（`topn_equal`，规则式换仓 + 换手上限 + 免交易带，类 qlib TopkDropout）三条策略流水线。另提供独立的**轮动分仓回测**（`hqopt rotate`）：外部选股列表 → T+1 开盘买入 → T+H 收盘卖出，资金分 H 份滚动。
 
 ## 安装
 
@@ -20,6 +20,10 @@ python scripts/verify_data_bundle.py --profile default \
 hqopt run configs/alpha_max_default.yaml        # 量化选股（全市场等权基准）
 hqopt run configs/index_enhance_default.yaml    # 指数增强（中证1000）
 hqopt run configs/topn_equal_default.yaml       # Top-N 等权持有（规则式，等权基准）
+
+# 轮动分仓回测：选股列表（[date, code] 长表）→ T+1 开盘买入，T+H 收盘卖出
+hqopt rotate --picks picks.parquet --hold-days 5 \
+    --start 2020-01-01 --end 2026-05-31 --index equal_weight
 ```
 
 产物在 `output/<策略>_default/`：`report.html`（交互报告）、`weights.parquet`、`nav.parquet`。
