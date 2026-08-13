@@ -4,6 +4,7 @@
     hqopt run <config>                          一站式：优化 → 回测 → HTML 报告
     hqopt optimize <config>                     逐期优化，输出权重矩阵
     hqopt backtest --weights ... --index ...    权重 → 回测 → HTML 报告
+    hqopt rotate --picks ... --hold-days H      选股列表 → 轮动分仓回测（T+1开盘买/T+H收盘卖）
     hqopt attribute --weights ... --index ...   权重 → 收益归因（风格/行业/特质）
     hqopt data sync|cne6|factor-return|index-close|index-weight   数据准备（导出脚本透传）
 
@@ -241,6 +242,58 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         raise
 
 
+def cmd_rotate(args: argparse.Namespace) -> None:
+    """选股列表 → 轮动分仓回测（T+1 开盘买 / T+H 收盘卖，资金分 H 份）。"""
+    from hqopt.backtest.rotate_run import run_rotate_backtest
+    from hqopt.io.run_manifest import RunManifestRecorder
+
+    rf = args.risk_free if args.risk_free is not None else None
+    out_dir = args.out_dir or (ROOT / "output" / "rotate")
+    picks_path = str(Path(args.picks).expanduser().resolve())
+    effective_config = {
+        "picks": picks_path,
+        "hold_days": args.hold_days,
+        "start_date": args.start,
+        "end_date": args.end,
+        "index": args.index,
+        "cost_buy": args.cost_buy,
+        "cost_sell": args.cost_sell,
+        "risk_free": 0.02 if rf is None else rf,
+        "initial_value": args.initial_value,
+        "output_dir": str(Path(out_dir).expanduser().resolve()),
+    }
+    recorder = RunManifestRecorder.start(
+        mode="rotate",
+        config=effective_config,
+        config_path=None,
+        output_dir=out_dir,
+        command=[str(value) for value in sys.argv],
+        data_lock=None,
+        input_files=[("picks", picks_path)],
+    )
+    try:
+        run_rotate_backtest(
+            picks_path, args.hold_days, args.start, args.end,
+            index=args.index, cost_buy=args.cost_buy, cost_sell=args.cost_sell,
+            initial_value=args.initial_value, out_dir=out_dir,
+            title=args.title,
+            **({} if rf is None else {"risk_free": rf}),
+        )
+        _finish_standalone_manifest(
+            recorder,
+            mode="rotate",
+            output_dir=out_dir,
+        )
+    except Exception as exc:
+        _finish_standalone_manifest(
+            recorder,
+            mode="rotate",
+            output_dir=out_dir,
+            error=exc,
+        )
+        raise
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """一站式：优化 → 回测 → 报告。基准默认 = 指增取 config.index、多头取全市场等权。"""
     from hqopt.backtest.run import run_backtest
@@ -396,6 +449,34 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--alpha-path", default=None,
                     help="报告最后一期目标持仓表 Alpha 列用的 alpha parquet 路径，不传则该列显示—")
     pb.set_defaults(func=cmd_backtest)
+
+    px = sub.add_parser(
+        "rotate",
+        help="选股列表→轮动分仓回测（T+1开盘买/T+H收盘卖，资金分H份）→报告",
+    )
+    px.add_argument("--picks", required=True,
+                    help="选股长表 parquet/csv，列 [date, code]，date=信号日 T")
+    px.add_argument("--hold-days", type=int, required=True,
+                    help="持有期 H（交易日）：T+1 开盘买入，T+H 收盘卖出，资金分 H 份")
+    px.add_argument("--start", required=True, help="回测起始日 如 2020-01-01")
+    px.add_argument("--end", required=True, help="回测截止日 如 2026-05-31")
+    px.add_argument(
+        "--index",
+        default="zz1000",
+        help="基准 key；equal_weight=全市场等权，其余为指数 key",
+    )
+    px.add_argument(
+        "--out-dir",
+        default=None,
+        help="报告输出目录；默认 output/rotate",
+    )
+    px.add_argument("--cost-buy", type=float, default=0.001)
+    px.add_argument("--cost-sell", type=float, default=0.002)
+    px.add_argument("--initial-value", type=float, default=1e8)
+    px.add_argument("--risk-free", type=float, default=None,
+                    help="年化无风险利率（Sharpe 用），不传时默认 0.02")
+    px.add_argument("--title", default=None, help="报告标题，不传自动生成")
+    px.set_defaults(func=cmd_rotate)
 
     pa = sub.add_parser("attribute", help="权重→收益归因（风格/行业/Country/特质分解）")
     pa.add_argument("--weights", required=True, help="权重 parquet（长表/宽表）")
