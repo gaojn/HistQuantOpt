@@ -482,14 +482,46 @@ def expected_run_artifacts(
 
 
 def load_run_quality_checks(weights_path: str | Path) -> dict[str, Any]:
-    """从批量统计读取求解后门禁摘要，写入顶层运行清单。"""
+    """从批量统计读取求解后门禁摘要，写入顶层运行清单。
+
+    除求解后校验外，还提取 Alpha 可信度与基准回退治理指标：合成 Alpha、
+    陈旧/跳过期数、official_drift 中途回退口径的期数。这些异常在逐期日志里
+    会被刷掉，只有进入顶层清单才能被审计工具和人可靠地看到。
+    """
     from hqopt.backtest.execution import batch_execution_stats_path_for_weights
 
     stats_path = batch_execution_stats_path_for_weights(weights_path)
     payload = json.loads(stats_path.read_text(encoding="utf-8"))
+    alpha_quality = payload.get("alpha_quality", {})
+    benchmark_quality = payload.get("benchmark_quality", {})
     return {
         "data_lock": "passed",
         "post_solve_validation": payload.get("optimization", {}).get("post_solve_validation", {}),
+        "alpha_quality": {
+            "synthetic": alpha_quality.get("synthetic"),
+            "max_observed_staleness_days": alpha_quality.get(
+                "max_observed_staleness_days"
+            ),
+            "stale_warning_period_count": alpha_quality.get(
+                "stale_warning_period_count"
+            ),
+            "skipped_period_count": alpha_quality.get("skipped_period_count"),
+            "zero_variance_period_count": alpha_quality.get(
+                "zero_variance_period_count"
+            ),
+        },
+        "benchmark_quality": {
+            "source": benchmark_quality.get("source"),
+            "fallback_period_count": benchmark_quality.get(
+                "fallback_period_count"
+            ),
+            "roster_change_period_count": benchmark_quality.get(
+                "roster_change_period_count"
+            ),
+            "stale_snapshot_period_count": benchmark_quality.get(
+                "stale_snapshot_period_count"
+            ),
+        },
     }
 
 

@@ -450,7 +450,9 @@ class IndexBenchmarkWeights:
         oc = self._get_official_cache()
         if oc is not None and len(oc):
             anchor = self._official_anchor(start_date, oc)
-            known_dates = set(price_pdf["date"])
+            # 复用上方 polars 去重结果；对 193 万行 pandas 列逐元素建 set
+            # 实测要 0.5s，而交易日只有 ~1500 个。
+            known_dates = set(self._trading_dates)
             if anchor is not None and anchor not in known_dates:
                 try:
                     extra = load_panel(

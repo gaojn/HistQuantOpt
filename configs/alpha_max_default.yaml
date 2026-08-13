@@ -51,7 +51,7 @@ optimizer:
 
 alpha:
   source: file
-  synthetic: true            # 文件本身由未来收益构造；终端和产物目录显示提醒，HTML 不加水印
+  synthetic: true            # 文件本身由未来收益构造；终端/产物目录/HTML 报告置顶水印均会提醒
   # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
   path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
   standardize: true          # 优化域内截面 z-score；关掉则 risk_aversion 等系数随因子量纲漂移

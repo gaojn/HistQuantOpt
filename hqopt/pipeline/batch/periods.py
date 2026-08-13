@@ -21,7 +21,6 @@ import pandas as pd
 import polars as pl
 
 from hqopt.optimizer._common import POST_SOLVE_ABS_TOL
-from hqopt.optimizer.index_enhance import IndexEnhanceConfig
 from hqopt.pipeline.batch.execution_walk import (
     _ExecutionWalker,
     _signal_day_suspended_tickers,
@@ -379,11 +378,10 @@ def _solve_period(
         )
         return None
 
-    # 首期无实际持仓时不施加换手硬上限（无「上期」可比）
-    inputs.optimizer.config = (
-        inputs.base_config if prev_weight is not None
-        else IndexEnhanceConfig(**{**inputs.base_config.__dict__, "max_turnover": None})
-    )
+    # 首期（prev_weight=None）无需特殊处理换手上限：turnover_terms 在
+    # masks.has_prev=False 时本就返回空约束。此前这里对共享 optimizer.config
+    # 做逐期突变属于冗余死代码，且是全管线唯一跨期可变状态，已删除
+    # （2026-08 性能/架构审查确认删除后全量测试与 golden 回测不变）。
     return inputs.optimizer.optimize(
         alpha=alpha, snapshot=ctx.snapshot,
         benchmark_weight=bm_series.values,

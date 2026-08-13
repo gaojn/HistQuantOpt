@@ -49,7 +49,11 @@ from hqopt.pipeline.batch.execution_walk import _partition_execution_days
 from hqopt.pipeline.batch.periods import _run_periods
 from hqopt.pipeline.batch.publish import _publish_outputs
 from hqopt.pipeline.batch.types import _BatchInputs, _RunConfig
-from hqopt.pipeline.universe import build_synthetic_alpha, load_alpha_panel
+from hqopt.pipeline.universe import (
+    alpha_panel_synthetic_marker,
+    build_synthetic_alpha,
+    load_alpha_panel,
+)
 from hqopt.risk import CNE6RiskModel
 
 logger = logging.getLogger(__name__)
@@ -107,6 +111,14 @@ def _load_alpha_matrix(
 
     if alpha_source == "file":
         logger.info(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
+        marker = alpha_panel_synthetic_marker(alpha_cfg["path"])
+        if marker and not synthetic_alpha:
+            raise ValueError(
+                f"Alpha 文件 {alpha_cfg['path']} 自带前视标记"
+                "（parquet metadata synthetic=true），但配置声明"
+                " alpha.synthetic=false。可信度声明只能加严不能放松：请改用"
+                " synthetic=true 运行，或换用不含前视的因子文件"
+            )
         return load_alpha_panel(alpha_cfg["path"]), synthetic_alpha
     generated_alpha = build_synthetic_alpha(
         panel,

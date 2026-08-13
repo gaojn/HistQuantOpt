@@ -438,8 +438,18 @@ def main(argv: list[str] | None = None) -> None:
 
         cov = load_factor_cov(variant, factor_order)
 
-        _atomic_write_parquet(exposure, out_dir / "exposure_panel.parquet")
-        _atomic_write_parquet(cov, out_dir / "factor_cov_panel.parquet")
+        # 必须按 rebal_date 排序写入：row group 才有单调的 min/max 统计，
+        # 加载端按日期过滤时可裁剪 row group。按 code 交错写入时统计区间
+        # 全部重叠，1.1GB 面板每次初始化都要全表扫描（实测 1.2~2s + 850MB
+        # 扫描缓冲）；排序后降到 ~0.1s。
+        _atomic_write_parquet(
+            exposure.sort(["rebal_date", "code"]),
+            out_dir / "exposure_panel.parquet",
+        )
+        _atomic_write_parquet(
+            cov.sort(["rebal_date", "factor"]),
+            out_dir / "factor_cov_panel.parquet",
+        )
         print(
             f"      exposure: {exposure.height:,} 行   "
             f"cov: {cov.height:,} 行  日期 {cov['rebal_date'].min()}~{cov['rebal_date'].max()}"
