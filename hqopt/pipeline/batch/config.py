@@ -20,7 +20,7 @@ from hqopt.pipeline.batch.types import _AlphaPolicy, _RunConfig
 logger = logging.getLogger(__name__)
 
 _INDEX_NAMES = {"hs300": "沪深300", "zz500": "中证500", "zz1000": "中证1000"}
-_STRATEGIES = {"index_enhance", "alpha_max"}
+_STRATEGIES = {"index_enhance", "alpha_max", "topn_equal"}
 _ALPHA_SOURCES = {"file", "synthetic"}
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -187,7 +187,7 @@ def _build_alpha_policy(alpha_cfg: dict[str, Any], rebal_freq: int) -> _AlphaPol
 
 def _parse_run_config(cfg: dict[str, Any]) -> _RunConfig:
     """校验策略并解析回测区间，打印运行头。"""
-    strategy = cfg["strategy"]          # "index_enhance" | "alpha_max"
+    strategy = cfg["strategy"]          # "index_enhance" | "alpha_max" | "topn_equal"
     if strategy not in _STRATEGIES:
         raise ValueError(
             f"strategy 须为 {sorted(_STRATEGIES)} 之一，当前为 {strategy!r}"

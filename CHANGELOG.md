@@ -7,6 +7,33 @@
 
 ---
 
+## 未发布（工作区，2026-08-13）
+
+### 新增：第三种策略 `topn_equal`——Top-N 等权持有（规则式，不走凸优化）
+
+`optimizer/topn_equal.py`（新增 `TopNEqualConfig` / `TopNEqualOptimizer` /
+`TopNEqualResult`）、`pipeline/batch/config.py`（`_STRATEGIES` 加入
+`topn_equal`）、`pipeline/batch_optimize.py`（`_build_optimizer` 分支）、
+`configs/topn_equal_default.yaml`（新增默认配置）。
+
+- **语义**：每期持有 alpha 排名前 N 只、逐票等权，与 qlib 的
+  `TopkDropoutStrategy` 同源：最差持仓 ↔ 最优候选配对交换，逐步逼近理想
+  组合。三级贪心分配换手预算：数量补足（执行损耗后净买入回到 N 只，
+  不需要卖出配对）→ 换股 → 等权再平衡（带外偏差从大到小）。
+- **双边换手硬上限** `max_turnover`（默认 0.40）：Σ|Δw| ≤ max_turnover +
+  cash_gap，与 QP 优化器的 `turnover_terms` 完全同口径；求解后 1e-5 门禁
+  同样生效。
+- **免交易带** `no_trade_band`（默认 0.005，绝对权重）：继续持有的票与等权
+  目标差异小于带宽时保持原权重不动，尽量减少交易只数；残差只向买方向
+  交易票分摊，带内票绝不被触碰。
+- **交易状态**：停牌冻结 / 禁开仓 / 只卖不买三类掩码复用
+  `_common.build_trading_masks`，与两个 QP 策略语义一致。
+- **影响**：纯新增，不改变 `alpha_max` / `index_enhance` 任何行为。18 个月
+  真实数据验证（2024-01 ~ 2025-06，36 期）：0 失败、持仓数恒为 100、
+  平均净换手 39.2%（≤ 40% 上限）、逐期求解 0.07s（无 QP 求解开销）。
+
+---
+
 ## 未发布（工作区，2026-08-12）
 
 ### 性能：求解降级链改为 PIQP → CLARABEL → SCS；新增候选池瘦身配置
