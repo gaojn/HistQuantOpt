@@ -192,6 +192,7 @@ def run_rotate_backtest(
     logger.info(
         f"\n  执行统计：买入放弃={exec_stats['buy_fail_count']}次  "
         f"卖出顺延={exec_stats['sell_defer_count']}次  "
+        f"退市强制核销={exec_stats['delist_forced_count']}笔  "
         f"末日未平仓={exec_stats['open_position_count']}只  "
         f"平均现金占比={exec_stats['avg_cash_pct']*100:.1f}%"
     )

@@ -255,6 +255,53 @@ def test_sell_blocked_by_suspension_defers():
     assert result.nav.iloc[2] == pytest.approx(result.nav.iloc[1], abs=1e-12)
 
 
+def test_delisted_forced_sell_at_prev_close():
+    """退市（行情整行消失）：不等到期，当日按前一日收盘价强制卖出核销。"""
+    dates = pd.bdate_range("2024-01-02", periods=6)
+    frames = _frames(dates, ["A", "B"])
+    # A：day1 开盘 10 买入，day2 收盘涨到 12，day3 起整行消失（退市）
+    frames["adj_close"].loc[dates[2], "A"] = 12.0
+    frames["close_raw"].loc[dates[2], "A"] = 12.0
+    for key in ("adj_open", "adj_close", "open_raw", "close_raw",
+                "limit_up", "limit_down"):
+        frames[key].loc[dates[3]:, "A"] = float("nan")
+    frames["trade_status"].loc[dates[3]:, "A"] = float("nan")
+    # H=5：正常到期日在 day5，但退市发生在 day3
+    picks = _picks([(dates[0], "A")])
+
+    result, stats, trades = _run(picks, frames, hold_days=5)
+
+    sells = trades[trades["side"] == "sell_delist"]
+    assert len(sells) == 1
+    assert sells.iloc[0]["date"] == dates[3]          # 退市当日核销
+    assert sells.iloc[0]["price"] == pytest.approx(12.0)  # 前一日（day2）收盘价
+    assert stats["delist_forced_count"] == 1
+    assert stats["open_position_count"] == 0
+
+    # 核销后全现金，NAV 平稳且反映 10→12 的持有收益（扣双边费用）
+    shares = INIT / 5 / (1 + COST_BUY) / 10.0
+    cash_expected = INIT - INIT / 5 + shares * 12.0 * (1 - COST_SELL)
+    assert result.nav.iloc[3] == pytest.approx(cash_expected / INIT, rel=1e-12)
+    assert result.nav.iloc[-1] == pytest.approx(result.nav.iloc[3], abs=1e-12)
+
+
+def test_suspension_row_present_not_treated_as_delist():
+    """停牌（行仍在、状态='停牌'）不触发退市核销，仍走顺延。"""
+    dates = pd.bdate_range("2024-01-02", periods=6)
+    frames = _frames(dates, ["A"])
+    frames["trade_status"].loc[dates[2], "A"] = "停牌"
+    frames["adj_close"].loc[dates[2], "A"] = float("nan")
+    frames["close_raw"].loc[dates[2], "A"] = float("nan")
+    picks = _picks([(dates[0], "A")])
+
+    _, stats, trades = _run(picks, frames, hold_days=2)
+
+    assert stats["delist_forced_count"] == 0
+    assert "sell_delist" not in set(trades["side"])
+    sells = trades[trades["side"].str.startswith("sell")]
+    assert sells.iloc[0]["date"] == dates[3]          # 复牌次日顺延卖出
+
+
 # ── 输入校验 ─────────────────────────────────────────────────────
 
 

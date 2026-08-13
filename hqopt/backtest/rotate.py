@@ -14,7 +14,9 @@
 - 买入日开盘涨停（open ≥ limit_up × 99.9%）或停牌：放弃该票，资金留现金；
 - 卖出日收盘跌停（close ≤ limit_down × 100.1%）或停牌：顺延到下一个
   可交易日收盘卖出；
-- 估值用 ffill 后的复权收盘价（退市/停牌沿用最近有效价），成交价不 ffill；
+- 退市（当日行情面板中该票整行消失，价格与交易状态均为 NaN）：不论是否
+  到期，当日按**最近有效收盘价**（即前一日价格）强制卖出核销，扣卖出费；
+- 估值用 ffill 后的复权收盘价（停牌沿用最近有效价），成交价不 ffill；
 - 成本非对称：买入 cost_buy（默认 1‰）、卖出 cost_sell（默认 2‰）。
 """
 
@@ -216,10 +218,13 @@ class RotateBacktester:
                         frames, state, records, i, signal_day, codes
                     )
 
-            # ── 2. 收盘卖出：到期桶（含顺延未卖出的）──
+            # ── 2. 退市核销：当日行情整行消失的持仓按前一日价格强制卖出 ──
+            day_traded += self._force_sell_delisted(frames, state, records, i)
+
+            # ── 3. 收盘卖出：到期桶（含顺延未卖出的）──
             day_traded += self._sell_due_buckets(frames, state, records, i)
 
-            # ── 3. 收盘估值 ──
+            # ── 4. 收盘估值 ──
             equity = state.cash + self._holdings_value(frames, state, day)
             records.port_values.iloc[i] = equity
             records.actual_weight_rows[day] = self._weights_row(frames, state, day, equity)
@@ -289,6 +294,48 @@ class RotateBacktester:
             )
         return traded
 
+    def _force_sell_delisted(
+        self,
+        frames: _RotateFrames,
+        state: _ReplayState,
+        records: _ReplayRecords,
+        i: int,
+    ) -> float:
+        """退市核销：当日行情整行消失的持仓按最近有效价（前一日价格）强制卖出。
+
+        区别于停牌：停牌日面板中仍有该票的行（trade_status='停牌'），走顺延；
+        只有价格与交易状态**同时**缺失（该票已从面板消失，即已退市）才触发。
+        不论持仓是否到期，当日立即核销、资金回笼，扣正常卖出费。
+        """
+        day = frames.dates[i]
+        close_row = frames.adj_close_raw.loc[day]
+        status_row = frames.trade_status.loc[day]
+        marked = frames.adj_close_marked.loc[day]
+        traded = 0.0
+
+        for bucket in state.buckets:
+            for code in list(bucket.holdings):
+                if pd.notna(close_row.get(code)) or pd.notna(status_row.get(code)):
+                    continue                     # 仍在面板中（含停牌），不属退市
+                px = marked.get(code)
+                if pd.isna(px) or px <= 0:
+                    continue                     # 无任何历史有效价，无法核销
+                shares = bucket.holdings.pop(code)
+                notional = shares * float(px)
+                state.cash += notional * (1.0 - self.cost_sell)
+                state.delist_forced_count += 1
+                traded += notional
+                records.turnover_by_signal[bucket.signal_day] += (
+                    notional / state.equity if state.equity > 1e-8 else 0.0
+                )
+                records.trades.append(
+                    (day, bucket.signal_day, code, "sell_delist",
+                     float(px), shares, notional)
+                )
+
+        state.buckets = [b for b in state.buckets if b.holdings]
+        return traded
+
     def _sell_due_buckets(
         self,
         frames: _RotateFrames,
@@ -312,7 +359,7 @@ class RotateBacktester:
                 px_adj = close_adj.get(code)
                 px_raw = close_px.get(code)
                 if pd.isna(px_adj) or px_adj <= 0:
-                    state.sell_defer_count += 1  # 无真实价（退市/长停），顺延
+                    state.sell_defer_count += 1  # 行在但无真实价（长停等），顺延
                     continue
                 if status.get(code) == _SUSPENDED:
                     state.sell_defer_count += 1
@@ -443,6 +490,7 @@ class RotateBacktester:
             "hold_days": self.hold_days,
             "buy_fail_count": state.buy_fail_count,
             "sell_defer_count": state.sell_defer_count,
+            "delist_forced_count": state.delist_forced_count,
             "unexecutable_signal_days": [
                 day.strftime("%Y-%m-%d") for day in state.unexecutable_signals
             ],
@@ -470,6 +518,7 @@ class _ReplayState:
     buckets: list[_Bucket] = field(default_factory=list)
     buy_fail_count: int = 0
     sell_defer_count: int = 0
+    delist_forced_count: int = 0
     unexecutable_signals: list = field(default_factory=list)
 
 
