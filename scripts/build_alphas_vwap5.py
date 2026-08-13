@@ -36,6 +36,7 @@ from pathlib import Path
 import pandas as pd
 
 from hqopt.io.data_panel import load_panel
+from hqopt.pipeline.universe import save_alpha_panel
 from hqopt.research.signal_grid import (
     DEFAULT_DECAY_LIST,
     DEFAULT_IC_LIST,
@@ -110,7 +111,9 @@ def main() -> None:
         fname = (
             f"alpha_vwap5_ic{ic_mean:.2f}_icir{icir_in:.1f}_decay{decay:.2f}.parquet"
         )
-        alpha_to_long(alpha_df).to_parquet(OUT_DIR / fname)
+        # 本脚本的因子用未来 VWAP 收益构造（前视），必须携带机器可读标记，
+        # 否则 --alpha-file 可把它当"真实"信号跑出无水印的回测报告。
+        save_alpha_panel(alpha_to_long(alpha_df), OUT_DIR / fname, synthetic=True)
 
         summary_rows.append({
             "filename": fname,

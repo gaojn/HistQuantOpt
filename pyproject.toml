@@ -26,6 +26,7 @@ dev = [
     "pytest-cov>=5.0",   # CI 覆盖率门禁
     "ruff",
     "mypy>=1.11",        # CI 类型门禁（配置见 [tool.mypy]）
+    "hypothesis>=6.100", # 性质测试（topn_equal / finalize_weights / 执行账本不变量）
 ]
 
 [project.scripts]

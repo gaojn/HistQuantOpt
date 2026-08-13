@@ -350,6 +350,53 @@ def _parse_dates_flexible(values) -> pd.Index:
         return pd.DatetimeIndex(pd.to_datetime(s, format="mixed"))
 
 
+# parquet schema metadata 键：因子文件的机器可读前视标记。
+# 生成含前视信号的脚本必须写入 b"true"；加载端读到后强制其可信度声明
+# 只能加严不能放松（见 alpha_panel_synthetic_marker 的调用方）。
+ALPHA_SYNTHETIC_METADATA_KEY = b"hqopt.alpha.synthetic"
+
+
+def save_alpha_panel(
+    alpha_df: pd.DataFrame,
+    path: str | Path,
+    *,
+    synthetic: bool,
+) -> Path:
+    """保存 Alpha 因子矩阵（长表或宽表），并嵌入机器可读的前视标记。
+
+    ``synthetic=True`` 表示信号构造使用了未来信息（如 shift(-H) 未来收益）。
+    该标记写入 parquet schema metadata，随文件流转；加载端
+    （``_load_alpha_matrix``）读到 True 而配置声明 false 时会直接拒绝运行，
+    防止 ``--alpha-file`` 把含前视的因子静默当作真实信号。
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pandas(alpha_df)
+    metadata = dict(table.schema.metadata or {})
+    metadata[ALPHA_SYNTHETIC_METADATA_KEY] = b"true" if synthetic else b"false"
+    table = table.replace_schema_metadata(metadata)
+    output = Path(path)
+    pq.write_table(table, output)
+    return output
+
+
+def alpha_panel_synthetic_marker(path: str | Path) -> bool | None:
+    """读取 Alpha parquet 的前视标记；无标记（历史文件/外部来源）返回 None。"""
+    import pyarrow.parquet as pq
+
+    metadata = pq.read_schema(path).metadata or {}
+    raw = metadata.get(ALPHA_SYNTHETIC_METADATA_KEY)
+    if raw is None:
+        return None
+    value = raw.decode("utf-8").strip().lower()
+    if value not in {"true", "false"}:
+        raise ValueError(
+            f"Alpha 文件 {path} 的 {ALPHA_SYNTHETIC_METADATA_KEY!r} 标记非法：{raw!r}"
+        )
+    return value == "true"
+
+
 def load_alpha_panel(path: str | Path) -> pd.DataFrame:
     """
     从 parquet 加载外部 Alpha 因子矩阵。

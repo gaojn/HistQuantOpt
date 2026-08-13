@@ -47,8 +47,10 @@ class RealMarketAdapter:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.adv_window = adv_window
         self.new_listing_days = new_listing_days
-        # ADV 预计算缓存（惰性初始化）：存 (code, date, adv) 长表（polars）
-        self._adv_cache: pl.DataFrame | None = None
+        # ADV 预计算缓存（惰性初始化）：date × code 宽表（pandas，已 ffill），
+        # as-of 查询退化为一次行定位。此前每期对 ~190 万行长表做
+        # filter+sort+group_by（9~13ms/期），6 年回测合计约 3.8s。
+        self._adv_wide: pd.DataFrame | None = None
         self._adv_cache_panel_id: int | None = None  # 用 id(panel) 判断缓存是否有效
 
     def build_snapshot(
@@ -266,7 +268,15 @@ class RealMarketAdapter:
             )
             .select(["code", "date", "adv"])
         )
-        self._adv_cache = adv_long
+        # 一次性 pivot 成 date × code 宽表并前向填充：每行即"截至该日
+        # 各股最近一次成交日的 ADV"，与逐期 as-of group_by(last) 语义一致。
+        adv_wide = (
+            adv_long.to_pandas()
+            .pivot(index="date", columns="code", values="adv")
+            .sort_index()
+            .ffill()
+        )
+        self._adv_wide = adv_wide
         self._adv_cache_panel_id = id(panel)
 
     def _compute_adv(
@@ -279,24 +289,27 @@ class RealMarketAdapter:
         首次调用时预计算全面板 ADV 并缓存；后续按 target_date 做 as-of 查询。
         """
         # 惰性初始化 / 面板变化时重建缓存
-        if self._adv_cache is None or self._adv_cache_panel_id != id(panel):
+        if self._adv_wide is None or self._adv_cache_panel_id != id(panel):
             self._build_adv_cache(panel)
         # _build_adv_cache 无条件填充缓存；断言把这个后置条件显式化。
-        assert self._adv_cache is not None
+        assert self._adv_wide is not None
 
-        # as-of：每只 code 取 date <= target_date 的最近一行 adv
+        # as-of：宽表已按日 ffill，定位 ≤ target_date 的最后一行即可
+        wide = self._adv_wide
+        key = (
+            pd.Timestamp(target_date)
+            if isinstance(wide.index, pd.DatetimeIndex)
+            else target_date
+        )
+        position = wide.index.searchsorted(key, side="right")
+        row = pd.Series(dtype=float) if position == 0 else wide.iloc[position - 1]
         adv_series = (
-            self._adv_cache
-            .filter(pl.col("date") <= target_date)
-            .sort(["code", "date"])
-            .group_by("code")
-            .agg(pl.last("adv"))   # 按 code 取最后（最新）一行
-            .to_pandas()
-            .set_index("code")["adv"]
-            .reindex(tickers)
+            row.reindex(tickers)
             .fillna(1e5)   # 数据缺失时给极小 ADV（相当于限制该股换手）
+            .astype(float)
         )
         adv_series.name = "adv"
+        adv_series.index.name = "code"
         return adv_series
 
     def _compute_status(self, today: pd.DataFrame) -> pd.Series:

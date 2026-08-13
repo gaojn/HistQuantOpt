@@ -1,0 +1,38 @@
+# 依赖锁（pip constraints 格式）。CI 用 `pip install -e ".[dev]" -c constraints.txt`
+# 按此安装，保证求解器/数值库版本可复现——cvxpy/piqp/clarabel 升级会改变数值
+# 结果，golden 回测漂移必须表现为对本文件的显式 diff，而不是 CI 静默换版本。
+#
+# 更新方式：本地升级并跑通全量测试 + golden 回测后，
+#   python -m pip freeze | grep -iE '^(polars|pyarrow|numpy|...)==' 回填本文件。
+attrs==25.4.0
+clarabel==0.11.1
+coverage==7.14.3
+cvxpy==1.8.2
+hypothesis==6.165.5
+iniconfig==2.3.0
+mypy==2.3.0
+mypy_extensions==1.1.0
+narwhals==2.19.0
+numpy==2.4.2
+osqp==1.1.1
+packaging==26.0
+pandas==2.3.3
+pathspec==1.1.1
+piqp==0.6.3
+plotly==6.6.0
+pluggy==1.6.0
+polars==1.39.2
+pyarrow==23.0.1
+pytest==9.0.2
+pytest-cov==7.1.0
+python-dateutil==2.9.0.post0
+pytz==2026.1.post1
+PyYAML==6.0.3
+ruff==0.15.17
+scipy==1.17.1
+scs==3.2.11
+six==1.17.0
+sortedcontainers==2.4.0
+tenacity==9.1.4
+typing_extensions==4.15.0
+tzdata==2026.2

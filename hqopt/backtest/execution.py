@@ -21,9 +21,10 @@ from numbers import Integral
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
-from hqopt.constants import LIMIT_TOL
+from hqopt.constants import LIMIT_TOL, SYNTHETIC_ALPHA_WARNING_FILE
 
 MAX_EXECUTION_ATTEMPTS = 3
 LEGACY_SELL_ONLY_MANIFEST_VERSION = 1
@@ -52,6 +53,19 @@ def batch_execution_stats_path_for_weights(weight_path: str | Path) -> Path:
     if weights.stem == "weights":
         return weights.parent / "batch_execution_stats.json"
     return weights.with_name(f"{weights.stem}.batch_execution_stats.json")
+
+
+def synthetic_alpha_warning_path_for_weights(weight_path: str | Path) -> Path:
+    """返回权重 bundle 对应的合成 Alpha 水印文件路径。
+
+    与 stats 文件同样按 stem 隔离：目录级单文件在"同目录多 bundle"布局下，
+    后发布的真实 Alpha bundle 会把先前合成 bundle 的水印 unlink 掉（漏报）。
+    标准布局（stem == "weights"）保持目录级文件名不变。
+    """
+    weights = Path(weight_path)
+    if weights.stem == "weights":
+        return weights.parent / SYNTHETIC_ALPHA_WARNING_FILE
+    return weights.with_name(f"{weights.stem}.{SYNTHETIC_ALPHA_WARNING_FILE}")
 
 
 def bundle_in_progress_path_for_weights(weight_path: str | Path) -> Path:
@@ -487,10 +501,22 @@ class ExecutionLedger:
         self.target_attempts = 0
 
     def _update_marks(self, adj_close: pd.Series) -> None:
-        for ticker, value in adj_close.items():
-            price = _valid_price(value)
-            if price > 0:
-                self.last_price[str(ticker)] = price
+        """批量更新估值价。逐元素 _valid_price 在 6 年回测中被调 ~250 万次
+        （0.84s），向量化后可忽略；NaN/非正价的过滤语义与逐元素版一致。"""
+        if adj_close.empty:
+            return
+        values = pd.to_numeric(adj_close, errors="coerce").to_numpy(dtype=float)
+        mask = ~np.isnan(values) & (values > 0)
+        if not mask.any():
+            return
+        tickers = adj_close.index.to_numpy()[mask]
+        self.last_price.update(
+            zip(
+                (str(ticker) for ticker in tickers),
+                values[mask].tolist(),
+                strict=True,
+            )
+        )
 
     def mark_to_market(self, adj_close: pd.Series) -> None:
         """仅更新估值价格，不执行或消耗当前目标的尝试次数。"""
@@ -571,6 +597,156 @@ class ExecutionLedger:
         self._finish_target()
         return len(expired), notional
 
+    @staticmethod
+    def _clean_prices(raw: pd.Series, index: pd.Index) -> np.ndarray:
+        """向量化 _valid_price：NaN / 非正 → 0（inf 视为正，与逐元素版一致）。"""
+        values = pd.to_numeric(raw.reindex(index), errors="coerce").to_numpy(dtype=float)
+        return np.where(~np.isnan(values) & (values > 0), values, 0.0)
+
+    def _sell_phase(
+        self,
+        *,
+        adj_vwap: pd.Series,
+        close_raw: pd.Series,
+        limit_down: pd.Series,
+        trade_status: pd.Series,
+    ) -> tuple[int, float, set[str], float]:
+        """先卖后买中的卖出阶段：逐笔卖出、逐笔按最新 NAV 重估。
+
+        语义与旧的 while + _delta_for 全量重算实现逐笔等价（同样的排序、
+        同样的逐笔 NAV 序列），区别只在数据结构：持仓市值与目标差额改为
+        numpy 向量增量维护。旧实现每卖一只就对全部 pending 重建 pandas
+        Series（O(卖出数 × pending 数)），6 年 / 500 只持仓场景下账本推进
+        独占 107s；本实现同场景约 10s。
+
+        Returns
+        -------
+        (filled_count, sell_total, blocked_sells, day_open_total_val)
+            day_open_total_val 为当日开盘（卖出前）的组合总值；总值 ≤1e-12
+            时返回前三项的零值，由调用方终止目标。
+        """
+        # pending_target 由调用方（step）保证非 None；断言显式化该前置条件。
+        assert self.pending_target is not None
+
+        # ── 持仓向量（估值口径与 position_values 一致：VWAP 无效回退最近收盘价）──
+        hold_index = pd.Index(list(self.shares), dtype=object)
+        shares_vec = np.fromiter(
+            (self.shares[t] for t in hold_index), dtype=float, count=len(hold_index)
+        )
+        hold_price = self._clean_prices(adj_vwap, hold_index)
+        fallback = np.fromiter(
+            (self.last_price.get(t, 0.0) for t in hold_index),
+            dtype=float,
+            count=len(hold_index),
+        )
+        hold_price = np.where(hold_price > 0, hold_price, fallback)
+        values_vec = np.where(
+            (shares_vec > 1e-10) & (hold_price > 0), shares_vec * hold_price, 0.0
+        )
+
+        def _portfolio_total() -> float:
+            # 只对非零市值求和：与旧 position_values 的 dict（不含零项）
+            # 逐比特一致——带零填充的 pairwise 求和树会在 ulp 级偏离，
+            # 破坏 golden 基线对整条净值序列的哈希锁定。
+            return float(self.cash + values_vec[values_vec > 0].sum())
+
+        total_val = _portfolio_total()
+        if total_val <= 1e-12:
+            return 0, 0.0, set(), total_val
+        day_open_total_val = total_val
+
+        # ── pending 向量（按 ticker 排序，与 _delta_for 的遍历顺序一致）──
+        pend_index = pd.Index(sorted(self.pending_tickers), dtype=object)
+        n_pending = len(pend_index)
+        target_vec = (
+            self.pending_target.reindex(pend_index, fill_value=0.0)
+            .to_numpy(dtype=float)
+        )
+        pos_in_hold = hold_index.get_indexer(pend_index)
+        held_mask = pos_in_hold >= 0
+        gather_pos = np.where(held_mask, pos_in_hold, 0)
+
+        vwap_vec = self._clean_prices(adj_vwap, pend_index)
+        close_vec = self._clean_prices(close_raw, pend_index)
+        limit_vec = self._clean_prices(limit_down, pend_index)
+        suspended_vec = (
+            trade_status.reindex(pend_index) == "停牌"
+        ).to_numpy(dtype=bool)
+        at_limit_down = (
+            (close_vec > 0)
+            & (limit_vec > 0)
+            & (close_vec <= limit_vec * (1 + LIMIT_TOL))
+        )
+        sell_blocked_vec = suspended_vec | at_limit_down | (vwap_vec <= 0)
+        sell_only_vec = np.fromiter(
+            (t in self.sell_only_tickers for t in pend_index),
+            dtype=bool,
+            count=n_pending,
+        )
+
+        active = np.ones(n_pending, dtype=bool)
+        blocked_sells: set[str] = set()
+        filled_count = 0
+        sell_total = 0.0
+
+        # 卖费使 NAV 逐笔下降 → 目标市值同步收缩，原待买单可能转为待卖单，
+        # 因此每卖出一只都要重算差额再选下一只（与旧实现相同的逐笔语义）。
+        while True:
+            current_vec = (
+                np.where(held_mask, values_vec[gather_pos], 0.0)
+                if len(hold_index)
+                else np.zeros(n_pending)
+            )
+            delta_vec = target_vec * total_val - current_vec
+
+            # 分类：|差额| ≤ min_notional 或 sell-only 无需卖出 → 直接完成。
+            # 中间态 order_states 不落 dict——卖出阶段后的买入分类会为所有
+            # 仍 pending 的股票重写状态，旧实现的逐轮 dict 写入不可观测。
+            fill_mask = active & (
+                (np.abs(delta_vec) <= self.min_notional)
+                | (sell_only_vec & (delta_vec > 0))
+            )
+            for i in np.nonzero(fill_mask)[0]:
+                self._mark_filled(str(pend_index[i]))
+                filled_count += 1
+            active &= ~fill_mask
+
+            sold_one = False
+            candidates = np.nonzero(active & (delta_vec < -self.min_notional))[0]
+            for i in candidates:
+                ticker = str(pend_index[i])
+                if ticker in blocked_sells:
+                    continue
+                if sell_blocked_vec[i]:
+                    blocked_sells.add(ticker)
+                    continue
+
+                price = float(vwap_vec[i])
+                position = int(pos_in_hold[i])
+                held_shares = float(shares_vec[position]) if position >= 0 else 0.0
+                shares_to_sell = min(-float(delta_vec[i]) / price, held_shares)
+                if shares_to_sell > 1e-10:
+                    remaining = held_shares - shares_to_sell
+                    shares_vec[position] = remaining
+                    self.shares[ticker] = remaining
+                    proceeds = shares_to_sell * price
+                    self.cash += proceeds * (1.0 - self.cost_sell)
+                    sell_total += proceeds
+                    values_vec[position] = (
+                        remaining * hold_price[position] if remaining > 1e-10 else 0.0
+                    )
+                    total_val = _portfolio_total()
+                self._mark_filled(ticker)
+                filled_count += 1
+                active[i] = False
+                sold_one = True
+                break
+
+            if not sold_one:
+                break
+
+        return filled_count, sell_total, blocked_sells, day_open_total_val
+
     def step(
         self,
         *,
@@ -581,14 +757,24 @@ class ExecutionLedger:
         limit_down: pd.Series,
         trade_status: pd.Series,
     ) -> ExecutionDayResult:
-        """推进一个交易日，只执行仍为 pending 的股票。"""
+        """推进一个交易日，只执行仍为 pending 的股票。
+
+        分为卖出（_sell_phase：逐笔、NAV 逐笔重估）与买入（现金约束下同
+        比例缩放）两个阶段，先卖后买。
+        """
         self._update_marks(adj_close)
         if self.pending_target is None or not self.pending_tickers:
             return ExecutionDayResult()
 
         self.target_attempts += 1
         attempt_number = self.target_attempts
-        delta, total_val = self._delta_for(self.pending_tickers, adj_vwap)
+
+        filled_count, sell_total, blocked_sells, total_val = self._sell_phase(
+            adj_vwap=adj_vwap,
+            close_raw=close_raw,
+            limit_down=limit_down,
+            trade_status=trade_status,
+        )
         if total_val <= 1e-12:
             self._finish_target()
             return ExecutionDayResult(attempt_number=attempt_number)
@@ -599,63 +785,8 @@ class ExecutionLedger:
         def exec_price(ticker: str) -> float:
             return _valid_price(adj_vwap.get(ticker))
 
-        filled_count = 0
-        sell_total = 0.0
         buy_total = 0.0
-        deferred_sells = 0
         failed_buys = 0
-
-        # 先卖：每成功卖出一只就按最新 NAV 重算。卖费可能使原待买单转为待卖单，
-        # 尤其在 T+3 必须同日继续卖完，不能直接过期。
-        blocked_sells: set[str] = set()
-        while self.pending_tickers:
-            sell_delta, _ = self._delta_for(self.pending_tickers, adj_vwap)
-            for ticker, value in sell_delta.items():
-                value = float(value)
-                if abs(value) <= self.min_notional:
-                    self._mark_filled(ticker)
-                    filled_count += 1
-                elif value < 0:
-                    self.order_states[ticker] = OrderState.PENDING_SELL
-                elif ticker in self.sell_only_tickers:
-                    self._mark_filled(ticker)
-                    filled_count += 1
-                else:
-                    self.order_states[ticker] = OrderState.PENDING_BUY
-
-            sold_one = False
-            for ticker, value in sell_delta.items():
-                if (
-                    ticker not in self.pending_tickers
-                    or ticker in blocked_sells
-                    or self.order_states[ticker] != OrderState.PENDING_SELL
-                    or value >= -self.min_notional
-                ):
-                    continue
-                price = exec_price(ticker)
-                blocked = (
-                    suspended(ticker)
-                    or self._at_limit(ticker, close_raw, limit_down, "down")
-                    or price <= 0
-                )
-                if blocked:
-                    blocked_sells.add(ticker)
-                    continue
-
-                held_shares = self.shares.get(ticker, 0.0)
-                shares_to_sell = min(-float(value) / price, held_shares)
-                if shares_to_sell > 1e-10:
-                    self.shares[ticker] = held_shares - shares_to_sell
-                    proceeds = shares_to_sell * price
-                    self.cash += proceeds * (1.0 - self.cost_sell)
-                    sell_total += proceeds
-                self._mark_filled(ticker)
-                filled_count += 1
-                sold_one = True
-                break
-
-            if not sold_one:
-                break
         deferred_sells = len(blocked_sells)
 
         # 卖出完成后，用真实现金和最新 NAV 重新计算剩余 pending 股票的买入差额。

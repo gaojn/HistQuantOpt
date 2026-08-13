@@ -24,9 +24,14 @@ from hqopt.backtest.execution import (
     normalize_sell_only_matrix,
     sell_only_manifest_path_for_weights,
     sell_only_path_for_weights,
+    synthetic_alpha_warning_path_for_weights,
     validate_sell_only_manifest,
 )
 from hqopt.backtest.report import generate_html_report
+from hqopt.constants import (
+    SYNTHETIC_ALPHA_WARNING_FILE,
+    SYNTHETIC_ALPHA_WARNING_TEXT,
+)
 from hqopt.data.benchmark import (
     benchmark_returns_from_rebalance_weights,
     equal_weight_benchmark_weights,
@@ -132,6 +137,26 @@ def _parse_date(s: str | date | pd.Timestamp) -> date:
     return pd.Timestamp(s).date()
 
 
+def _detect_warning_banner(weight_path: str | Path) -> str | None:
+    """权重 bundle 带合成 Alpha 警告文件时，报告必须携带水印。
+
+    优化阶段（batch.publish）会在合成 Alpha 运行的权重旁落按 stem 隔离的
+    SYNTHETIC_ALPHA_WARNING.txt；回测端据此自动接上 HTML 置顶横幅，
+    避免"含前视信号的漂亮报告"被无提示地截图外传。目录级旧水印文件也
+    保守地一并触发（宁可误报，不可漏报）。
+    """
+    weights = Path(weight_path).resolve()
+    candidates = [
+        synthetic_alpha_warning_path_for_weights(weights),
+        weights.parent / SYNTHETIC_ALPHA_WARNING_FILE,   # 旧版目录级布局
+    ]
+    for warning_file in candidates:
+        if warning_file.is_file():
+            text = warning_file.read_text(encoding="utf-8").strip()
+            return text or SYNTHETIC_ALPHA_WARNING_TEXT
+    return None
+
+
 def run_backtest(
     weight_path: str | Path,
     start_date: str | date,
@@ -146,6 +171,7 @@ def run_backtest(
     cache_dir: str | Path | None = None,
     index_close_path: str | Path | None = None,
     alpha_path: str | Path | None = None,
+    warning_banner: str | None = None,
 ) -> tuple:
     """
     加载权重文件，执行 T+1 VWAP 真实回测，生成 HTML 报告。
@@ -164,6 +190,10 @@ def run_backtest(
     index_close_path : 指数收盘价 CSV 路径，None 用默认
     alpha_path  : 报告"最后一期目标持仓"表 Alpha 列用的 alpha parquet 路径，
                   None 时该列显示"—"
+    warning_banner : HTML 报告置顶风险水印文本。None（默认）时自动探测：
+                  权重 bundle 带 SYNTHETIC_ALPHA_WARNING.txt 即取其内容。
+                  注意空字符串 "" 会显式关闭探测与水印——仅当确认权重
+                  绝无前视信号时才可传入
 
     Returns
     -------
@@ -266,9 +296,14 @@ def run_backtest(
         report_title = title or (
             f"回测报告  {benchmark_label}基准  {actual_start}~{actual_end}"
         )
+        if warning_banner is None:
+            warning_banner = _detect_warning_banner(weight_path)
+        if warning_banner:
+            logger.warning("  ⚠️ 报告将携带置顶风险水印（合成/前视 Alpha）")
         report_path = generate_html_report(
             result, output_path=out_path / "report.html", title=report_title,
             cache_dir=cache_dir, alpha_path=alpha_path,
+            warning_banner=warning_banner,
         )
         logger.info(f"\n  HTML 报告：{report_path}")
         nav_df = pd.DataFrame({

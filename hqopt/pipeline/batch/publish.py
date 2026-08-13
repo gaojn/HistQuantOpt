@@ -11,11 +11,11 @@ import logging
 import numpy as np
 import pandas as pd
 
-from hqopt.backtest.execution import publish_batch_bundle
-from hqopt.constants import (
-    SYNTHETIC_ALPHA_WARNING_FILE,
-    SYNTHETIC_ALPHA_WARNING_TEXT,
+from hqopt.backtest.execution import (
+    publish_batch_bundle,
+    synthetic_alpha_warning_path_for_weights,
 )
+from hqopt.constants import SYNTHETIC_ALPHA_WARNING_TEXT
 from hqopt.optimizer._common import POST_SOLVE_ABS_TOL
 from hqopt.pipeline.batch.types import _BatchInputs, _PeriodOutcome
 
@@ -153,7 +153,9 @@ def _publish_outputs(inputs: _BatchInputs, outcome: _PeriodOutcome) -> pd.DataFr
         inputs.output_path,
     )
 
-    warning_path = out_path.parent / SYNTHETIC_ALPHA_WARNING_FILE
+    # 水印按权重 stem 隔离：真实 Alpha bundle 的清除动作绝不能摘掉同目录内
+    # 其他合成 bundle 的水印。
+    warning_path = synthetic_alpha_warning_path_for_weights(out_path)
     if inputs.synthetic_alpha:
         warning_path.write_text(SYNTHETIC_ALPHA_WARNING_TEXT, encoding="utf-8")
     else:

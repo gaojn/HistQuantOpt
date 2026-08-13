@@ -24,6 +24,72 @@ _STRATEGIES = {"index_enhance", "alpha_max", "topn_equal"}
 _ALPHA_SOURCES = {"file", "synthetic"}
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
+# ── 配置键白名单 ────────────────────────────────────────────────────
+# 未知键必须报错而不是静默忽略：约束键拼错（如 max_turnvoer）等价于
+# 无声关闭风控，比缺配更危险。新增配置键时同步维护这里。
+_TOP_LEVEL_KEYS = {
+    "strategy", "index", "data", "backtest", "universe",
+    "optimizer", "alpha", "execution", "output",
+}
+_SECTION_KEYS: dict[str, set[str]] = {
+    "data": {"root", "manifest", "lock", "profile"},
+    "backtest": {
+        "start_date", "end_date", "rebalance_freq", "initial_value", "benchmark",
+    },
+    "universe": {
+        "exclude_bj", "exclude_st", "top_n", "alpha_top_m", "new_listing_days",
+    },
+    "alpha": {
+        "source", "synthetic", "path", "standardize", "max_staleness_days",
+        "fwd_days", "ic_mean", "ic_std", "decay", "seed",
+    },
+    "execution": {"cost_buy", "cost_sell", "risk_free"},
+    "output": {"weights"},
+}
+# optimizer 键按策略区分：共享键 + 各策略专属键。
+_OPTIMIZER_COMMON_KEYS = {
+    "risk_aversion", "min_risk_coverage", "cne6_data_dir",
+    "max_turnover", "turnover_penalty", "liquidity_weighted_cost",
+}
+_OPTIMIZER_KEYS: dict[str, set[str]] = {
+    "index_enhance": _OPTIMIZER_COMMON_KEYS | {
+        "weight_upper", "min_constituent_ratio", "industry_active_bound",
+        "style_active_bound", "tracking_penalty", "active_weight_upper",
+        "weight_diff_l2_bound", "te_upper",
+        "benchmark_weight_source", "benchmark_max_snapshot_age_days",
+    },
+    "alpha_max": _OPTIMIZER_COMMON_KEYS | {
+        "weight_upper", "industry_upper", "min_constituent_ratio",
+        "diversification_penalty", "style_bound", "vol_upper",
+    },
+    "topn_equal": _OPTIMIZER_COMMON_KEYS | {"top_n", "no_trade_band"},
+}
+
+
+def _validate_config_keys(cfg: dict[str, Any], strategy: str) -> None:
+    """拒绝任何白名单外的配置键（fail-closed）。"""
+    problems: list[str] = []
+    unknown_top = set(cfg) - _TOP_LEVEL_KEYS
+    if unknown_top:
+        problems.append(f"顶层未知键 {sorted(unknown_top)}")
+
+    sections = dict(_SECTION_KEYS)
+    sections["optimizer"] = _OPTIMIZER_KEYS[strategy]
+    for section, allowed in sections.items():
+        value = cfg.get(section)
+        if not isinstance(value, dict):
+            continue
+        unknown = set(value) - allowed
+        if unknown:
+            problems.append(
+                f"{section} 未知键 {sorted(unknown)}（允许：{sorted(allowed)}）"
+            )
+    if problems:
+        raise ValueError(
+            "配置包含未识别的键，可能是拼写错误——未知约束键会被静默忽略、"
+            "等价于关闭风控，必须修正：" + "；".join(problems)
+        )
+
 # Alpha 陈旧告警阈值下限（自然日），防止高频调仓时阈值过小而刷屏。
 _MIN_ALPHA_STALENESS_WARN_DAYS = 7
 
@@ -192,6 +258,7 @@ def _parse_run_config(cfg: dict[str, Any]) -> _RunConfig:
         raise ValueError(
             f"strategy 须为 {sorted(_STRATEGIES)} 之一，当前为 {strategy!r}"
         )
+    _validate_config_keys(cfg, strategy)
     index    = cfg["index"]
     bt_cfg   = cfg["backtest"]
     uni_cfg  = cfg["universe"]

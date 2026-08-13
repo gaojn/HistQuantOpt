@@ -9,6 +9,65 @@
 
 ## 未发布（工作区，2026-08-13）
 
+### 治理：合成 Alpha 报告水印接线 + alpha 文件机器可读前视标记 + YAML 未知键拒绝
+
+三项独立审查（回测正确性 / 性能 / 架构）后的 P0 修复批次。
+
+- **HTML 报告水印**（`backtest/run.py`）：`run_backtest` 新增
+  `warning_banner` 参数，默认自动探测权重同目录的
+  `SYNTHETIC_ALPHA_WARNING.txt` 并接到报告置顶横幅。此前 `report.py` 的
+  水印能力存在但全链路无人传入——含前视信号的回测能产出无任何提示的
+  正式报告。`hqopt run` / `hqopt backtest` 两条路径均自动生效。
+- **alpha parquet 前视标记**（`pipeline/universe.py`）：新增
+  `save_alpha_panel(..., synthetic=)` / `alpha_panel_synthetic_marker`，
+  在 parquet schema metadata 写入/读取 `hqopt.alpha.synthetic`。加载端读到
+  `true` 而配置声明 `synthetic: false` 时直接拒绝运行（声明只能加严）。
+  `scripts/build_alphas_vwap5.py` 生成的前视因子自动携带标记；存量无标记
+  文件行为不变。
+- **⚠️ YAML 未知键白名单**（`pipeline/batch/config.py`）：顶层与各节
+  （optimizer 按策略区分）白名单校验，未知键直接报错。此前
+  `max_turnvoer: 0.4` 这类拼写错误会被静默忽略、等价于关闭风控。
+  含未知键的旧配置在新版本下会报错——这是暴露既有问题，不是回归。
+- **运行清单质量检查增补**（`io/run_manifest.py`）：顶层
+  `quality_checks` 加入 `alpha_quality`（synthetic / 陈旧 / 跳过 / 零方差
+  期数）与 `benchmark_quality`（来源 / 回退期数），审计不再需要翻逐期日志。
+- **复核修补**（独立 agent 复核后）：水印文件按权重 stem 隔离
+  （`synthetic_alpha_warning_path_for_weights`，标准布局 `weights.parquet`
+  文件名不变）——目录级单文件在同目录多 bundle 布局下，真实 Alpha 发布会
+  摘掉合成 bundle 的水印（漏报）；旧目录级水印文件在回测端保守触发。
+  预加载 `alpha_df` 路径同样校验文件前视标记，不能因 early return 绕过。
+
+### 性能：执行账本卖出循环向量化（500 持仓场景 18×）+ 数据链路四处热点
+
+**所有优化经 18 个月真实数据（指增 + topn_equal 各 36 期）验证：权重矩阵、
+期末 NAV、现金与 main 逐比特一致；golden 基线的整条净值哈希不变。**
+
+- **执行账本**（`backtest/execution.py`）：`step()` 卖出阶段改为 numpy
+  向量增量重估（保持逐笔卖出、逐笔 NAV 重估的原语义与浮点求和顺序）；
+  `_update_marks` 批量化。6 年日频基准：100 持仓 9.0s→2.1s，500 持仓
+  82.1s→4.5s，消除 O(卖出数×pending 数) 超线性恶化。
+- **CNE6 面板按 rebal_date 排序落盘**（`scripts/export_cne6_panels.py` +
+  存量面板重写）：row group 统计单调后加载端可裁剪，1.1GB 面板初始化
+  ~2s→0.44s。本地 S/L 四个面板文件已重排（内容不变仅重排序），数据锁
+  已按新哈希重新生成。
+- **因子协方差装载向量化**（`risk/cne6_risk.py`）：~1550 期逐期
+  group_by + K² 次 list.index 改为一次 sort + reshape 批处理，0.85s→~0.1s。
+- **ADV as-of 预计算**（`data/real_adapter.py`）：190 万行长表逐期
+  filter+sort+group_by 改为一次 pivot+ffill 宽表 + O(1) 行定位。
+- **基准漂移热点**（`data/benchmark.py`）：`known_dates` 复用 polars
+  去重结果，省掉对 193 万行 pandas 列建 set（0.5s/次）。
+- **死代码删除**（`pipeline/batch/periods.py`）：首期 optimizer.config
+  逐期突变删除（`turnover_terms` 在无上期时本就返回空约束），管线不再有
+  跨期可变优化器状态。
+
+### 工程：依赖锁定 CI + hypothesis 性质测试
+
+- `constraints.txt` 锁定全部依赖版本，CI 按锁安装（求解器升级导致的数值
+  漂移必须表现为锁文件的显式 diff）；Python 钉 3.14/3.12 小版本。
+- 新增 `tests/test_property_invariants.py`：hypothesis 随机场景下的
+  `topn_equal` 约束不变量、`finalize_weights` 不放大性、执行账本零成本
+  NAV 守恒 / 现金股数非负 / 冻结持仓不变（约 800 随机用例）。
+
 ### 新增：轮动分仓回测 `hqopt rotate`（T日选股→T+1开盘买→T+H收盘卖，资金分H份）
 
 `backtest/rotate.py`（新增 `RotateBacktester`）、`backtest/rotate_run.py`

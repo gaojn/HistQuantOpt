@@ -142,22 +142,50 @@ def _load_cov_panel(
 
     factor_names = [c for c in cov.columns if c not in ("rebal_date", "factor")]
     _validate_factor_contract(factor_names, variant)
-    cov_by_date: dict[date, tuple[list[str], np.ndarray]] = {}
-    for rdate, sub in cov.group_by("rebal_date"):
-        rdate = rdate[0] if isinstance(rdate, tuple) else rdate
-        order = sub["factor"].to_list()
-        if len(order) != len(factor_names) or set(order) != set(factor_names):
-            raise ValueError(f"CNE6{variant or ''} {rdate} 协方差行列不完整")
-        mat = sub.select(order).to_numpy().astype(np.float64)
-        if not np.isfinite(mat).all():
-            raise ValueError(f"CNE6{variant or ''} {rdate} 协方差含 NaN/Inf")
-        # 对齐到统一 factor_names 顺序
-        pos = [order.index(f) for f in factor_names]
-        F = mat[np.ix_(pos, pos)]
-        F = 0.5 * (F + F.T)           # 数值对称化
-        F += 1e-8 * np.eye(F.shape[0])  # 保证严格 PSD，防微小负特征值破坏凸性
-        cov_by_date[rdate] = (factor_names, F)
 
+    # 向量化装载：按 (rebal_date, factor) 排序一次，reshape 成 (T, K, K)
+    # 批量对称化/加 jitter。此前对 ~1550 期逐期 group_by + K² 次 list.index
+    # 的纯 Python 循环实测 0.85s，向量化后 ~0.1s。
+    K = len(factor_names)
+    sorted_factors = sorted(factor_names)
+    cov_sorted = cov.sort(["rebal_date", "factor"])
+    dates = cov_sorted["rebal_date"].unique(maintain_order=True).to_list()
+
+    # 完整性校验：每期必须恰好 K 行且 factor 集合完整。排序后逐期块的
+    # factor 序列必然等于 sorted_factors，等价于原逐期 set 比较。
+    counts = (
+        cov_sorted.group_by("rebal_date", maintain_order=True)
+        .agg(pl.len().alias("rows"), pl.col("factor").n_unique().alias("uniq"))
+    )
+    bad = counts.filter((pl.col("rows") != K) | (pl.col("uniq") != K))
+    if len(bad):
+        raise ValueError(
+            f"CNE6{variant or ''} {bad['rebal_date'].to_list()[:5]} 协方差行列不完整"
+        )
+    expected_block = sorted_factors * len(dates)
+    if cov_sorted["factor"].to_list() != expected_block:
+        raise ValueError(f"CNE6{variant or ''} 协方差 factor 行标签与列名集合不一致")
+
+    mats = (
+        cov_sorted.select(sorted_factors)
+        .to_numpy()
+        .astype(np.float64)
+        .reshape(len(dates), K, K)
+    )
+    if not np.isfinite(mats).all():
+        bad_periods = [
+            dates[i] for i in np.nonzero(~np.isfinite(mats).all(axis=(1, 2)))[0][:5]
+        ]
+        raise ValueError(f"CNE6{variant or ''} {bad_periods} 协方差含 NaN/Inf")
+    mats = 0.5 * (mats + mats.transpose(0, 2, 1))   # 数值对称化
+    mats += 1e-8 * np.eye(K)                        # 严格 PSD，防微小负特征值破坏凸性
+    # 对齐回文件列顺序 factor_names（行=列=sorted_factors → factor_names）
+    pos = [sorted_factors.index(f) for f in factor_names]
+    mats = mats[:, pos, :][:, :, pos]
+
+    cov_by_date: dict[date, tuple[list[str], np.ndarray]] = {
+        d: (factor_names, mats[i]) for i, d in enumerate(dates)
+    }
     return cov_by_date, sorted(cov_by_date.keys())
 
 

@@ -722,6 +722,28 @@ def _alpha_config(tmp_path) -> dict:
     }
 
 
+def test_preloaded_alpha_df_cannot_bypass_file_marker(tmp_path):
+    """预加载矩阵 + 声明 synthetic=false 不能绕过文件自带的前视标记。"""
+    from hqopt.pipeline.universe import save_alpha_panel
+
+    alpha = pd.DataFrame(
+        {"A": [1.0, 1.0], "B": [0.0, 0.0]},
+        index=pd.to_datetime(["2024-01-02", "2024-01-04"]),
+    )
+    marked = tmp_path / "marked_alpha.parquet"
+    save_alpha_panel(alpha, marked, synthetic=True)
+
+    config = _alpha_config(tmp_path)
+    config["alpha"] = {
+        "source": "file",
+        "synthetic": False,
+        "path": str(marked),
+    }
+
+    with pytest.raises(ValueError, match="前视标记"):
+        batch.run_batch_optimize(config, panel=_panel(), alpha_df=alpha)
+
+
 def test_preloaded_alpha_cannot_bypass_metadata_validation(tmp_path):
     """预载矩阵也必须先校验 source/synthetic，不能因提前返回而绕过。"""
     config = _alpha_config(tmp_path)

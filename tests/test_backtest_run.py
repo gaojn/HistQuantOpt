@@ -16,10 +16,33 @@ from hqopt.backtest.execution import (
 )
 from hqopt.backtest.run import (
     _align_sell_only_metadata,
+    _detect_warning_banner,
     _load_sell_only_metadata,
     _save_execution_stats,
     run_backtest,
 )
+
+
+def test_detect_warning_banner_stem_scoped_and_legacy(tmp_path):
+    """水印探测：按 stem 隔离的文件优先，目录级旧文件保守触发，缺失返回 None。"""
+    from hqopt.backtest.execution import synthetic_alpha_warning_path_for_weights
+
+    weights = tmp_path / "shadow.parquet"
+    assert _detect_warning_banner(weights) is None
+
+    # stem 隔离的水印只属于本 bundle
+    scoped = synthetic_alpha_warning_path_for_weights(weights)
+    assert scoped.name == "shadow.SYNTHETIC_ALPHA_WARNING.txt"
+    scoped.write_text("含前视信号", encoding="utf-8")
+    assert _detect_warning_banner(weights) == "含前视信号"
+    assert _detect_warning_banner(tmp_path / "other.parquet") is None
+
+    # 旧版目录级文件：任何 bundle 都保守触发（宁可误报不可漏报）
+    scoped.unlink()
+    (tmp_path / "SYNTHETIC_ALPHA_WARNING.txt").write_text("旧水印", encoding="utf-8")
+    assert _detect_warning_banner(weights) == "旧水印"
+    # 标准布局（stem=weights）与目录级文件是同一路径
+    assert _detect_warning_banner(tmp_path / "weights.parquet") == "旧水印"
 
 
 def test_save_execution_stats_records_expired_orders(tmp_path):
