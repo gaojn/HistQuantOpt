@@ -35,6 +35,7 @@ from hqopt.data.real_adapter import RealMarketAdapter
 from hqopt.io.data_panel import load_panel
 from hqopt.optimizer.alpha_max import AlphaMaxConfig, AlphaMaxOptimizer
 from hqopt.optimizer.index_enhance import IndexEnhanceConfig, IndexEnhanceOptimizer
+from hqopt.optimizer.topn_equal import TopNEqualConfig, TopNEqualOptimizer
 from hqopt.pipeline.batch.config import (
     _build_alpha_policy,
     _optional_float,
@@ -139,6 +140,14 @@ def _build_optimizer(
             te_upper=_optional_float(opt_cfg, "te_upper"),
         )
         return IndexEnhanceOptimizer(ie_config), ie_config
+
+    if strategy == "topn_equal":
+        tn_config = TopNEqualConfig(
+            top_n=int(opt_cfg["top_n"]),
+            max_turnover=_optional_float(opt_cfg, "max_turnover"),
+            no_trade_band=float(opt_cfg.get("no_trade_band", 0.005)),
+        )
+        return TopNEqualOptimizer(tn_config), tn_config
 
     am_config = AlphaMaxConfig(
         weight_upper=float(opt_cfg["weight_upper"]),

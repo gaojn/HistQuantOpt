@@ -1,4 +1,4 @@
-"""两个 default 配置可加载且字段完整。"""
+"""三个 default 配置可加载且字段完整。"""
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,7 @@ def test_default_configs_load():
     for path, strat in [
         ("configs/alpha_max_default.yaml", "alpha_max"),
         ("configs/index_enhance_default.yaml", "index_enhance"),
+        ("configs/topn_equal_default.yaml", "topn_equal"),
     ]:
         cfg = load_config(path)
         assert cfg["strategy"] == strat
@@ -27,7 +28,9 @@ def test_default_configs_load():
             assert cfg["backtest"]["benchmark"] == "equal_weight"
         for k in ("start_date", "end_date", "rebalance_freq", "initial_value"):
             assert k in cfg["backtest"]
-        assert "weight_upper" in cfg["optimizer"]
+        # topn_equal 是等权持有策略，没有个股权重上限参数
+        expected_key = "top_n" if strat == "topn_equal" else "weight_upper"
+        assert expected_key in cfg["optimizer"]
 
 
 def test_index_enhance_default_style_dict_parses():

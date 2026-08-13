@@ -1,0 +1,46 @@
+# ============================================================================
+# Top-N 等权持有（topn_equal）默认配置
+#   每期持有 alpha 前 N 只等权，规则式调仓（不走凸优化），与 qlib 的
+#   TopkDropoutStrategy 同源：最差持仓换最优候选，配对交换逐步逼近理想组合。
+#   额外规则：双边换手硬上限 + 免交易带（尽量减少交易只数）。
+# ============================================================================
+strategy: topn_equal
+index: all                # 全市场选股
+
+data:
+  root: ".."              # 相对本 YAML；wheel 安装后仍使用外部项目数据目录
+
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2026-05-31"
+  rebalance_freq: 10        # 每 10 个交易日换仓一次
+  initial_value: 100000000  # 初始资金 1 亿元
+  benchmark: equal_weight   # 回测与归因统一使用全市场等权基准
+
+universe:
+  exclude_bj: true          # 剔除北交所
+  exclude_st: true          # 剔除 ST/*ST
+  top_n: null               # 不按市值截断，全市场
+  new_listing_days: 120     # 次新股：上市不足此自然日数禁止持仓（list_days < 该值）
+
+optimizer:
+  top_n: 100                # 目标持仓只数 N（每只约 1/N = 1%）
+  max_turnover: 0.40        # 双边换手硬上限 40%（≈单边 20%；N=100 时约 20 组换股）
+  no_trade_band: 0.005      # 免交易带（绝对权重）：与等权目标差异 < 0.5% 不交易。
+                            # 带宽越大交易只数越少、权重漂移越大；0 = 每期精确回到等权
+
+alpha:
+  source: file
+  synthetic: true           # 文件本身由未来收益构造；终端和产物目录显示提醒，HTML 不加水印
+  # ⚠️ 示例为 VWAP5 合成因子（含未来信息，仅跑通流程）；生产请替换为研究员真实 alpha
+  path: "alphas/alpha_vwap5_ic0.10_icir0.8_decay0.80.parquet"
+  standardize: true         # 本策略只用 alpha 排序，标准化与否不影响结果；保持口径一致
+  max_staleness_days: 15    # 10交易日换仓约对应15自然日；超限跳过，禁止无限复用旧信号
+
+execution:
+  cost_buy: 0.001           # 买入费率 1‰
+  cost_sell: 0.002          # 卖出费率 2‰（非对称）
+  risk_free: 0.02           # 年化无风险利率（Sharpe 用）
+
+output:
+  weights: "output/topn_equal_default/weights.parquet"

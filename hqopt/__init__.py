@@ -36,6 +36,9 @@ _EXPORTS = {
     "IndexEnhanceConfig": ("hqopt.optimizer.index_enhance", "IndexEnhanceConfig"),
     "IndexEnhanceOptimizer": ("hqopt.optimizer.index_enhance", "IndexEnhanceOptimizer"),
     "IndexEnhanceResult": ("hqopt.optimizer.index_enhance", "IndexEnhanceResult"),
+    "TopNEqualConfig": ("hqopt.optimizer.topn_equal", "TopNEqualConfig"),
+    "TopNEqualOptimizer": ("hqopt.optimizer.topn_equal", "TopNEqualOptimizer"),
+    "TopNEqualResult": ("hqopt.optimizer.topn_equal", "TopNEqualResult"),
     # 回测
     "RealisticBacktester": ("hqopt.backtest.engine", "RealisticBacktester"),
     # Backtester 是旧公开 API 名称；真实执行回测已统一融合到 engine.py。
