@@ -35,8 +35,10 @@ from hqopt.pipeline.batch.types import (
 from hqopt.pipeline.universe import (
     AlphaZeroVarianceError,
     build_cost_vector,
+    candidate_pool_mask,
     filter_universe,
     get_alpha_for_date,
+    subset_snapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -234,24 +236,120 @@ def _resolve_period_alpha(
     return alpha_slice.values
 
 
+def _reduce_candidate_pool(
+    inputs: _BatchInputs,
+    ctx: _PeriodContext,
+    alpha: np.ndarray,
+    cost_vector: np.ndarray | None,
+    rebal_date: date,
+) -> tuple[_PeriodContext, np.ndarray, np.ndarray | None]:
+    """按 ``universe.alpha_top_m`` 瘦身优化域；未配置或无需瘦身时原样返回。
+
+    保留集 = alpha top-M ∪ 当前持仓 ∪ 基准股（指增）∪ 成分股容量兜底
+    （见 :func:`hqopt.pipeline.universe.candidate_pool_mask`）。alpha 与
+    ``cost_vector`` 都必须在**全池**上算好后直接切片、不得重算——alpha 重新
+    标准化或成本向量按瘦身池重新归一化（中位数=1 的口径随池变化）都会
+    悄悄改变目标函数，破坏与全池解的等价性。
+    """
+    top_m = inputs.universe_cfg.get("alpha_top_m")
+    if not top_m:
+        return ctx, alpha, cost_vector
+    n = len(ctx.snapshot.tickers)
+    if n <= int(top_m):
+        return ctx, alpha, cost_vector
+
+    benchmark_weight = (
+        inputs.benchmark.get_weights(rebal_date, tickers=ctx.snapshot.tickers).values
+        if inputs.benchmark is not None
+        else None
+    )
+    keep = candidate_pool_mask(
+        alpha, ctx.snapshot, ctx.prev_weight, benchmark_weight, int(top_m),
+        style_loading=ctx.style_loading,
+    )
+    if keep.all():
+        return ctx, alpha, cost_vector
+
+    keep_idx = np.where(keep)[0]
+    snapshot = subset_snapshot(ctx.snapshot, keep_idx)
+    risk_snap = inputs.risk_model.at(rebal_date, snapshot.tickers)
+    if risk_snap is None:
+        # 全池已确认有风险覆盖，子集不该失败；防御性回退全池而非中断
+        logger.warning(
+            f"  [{rebal_date}] 候选池瘦身后风险模型取切片失败，回退全池求解"
+        )
+        return ctx, alpha, cost_vector
+    logger.info(
+        f"  [{rebal_date}] 候选池瘦身 {n} → {len(keep_idx)} 只（alpha_top_m={top_m}）"
+    )
+    return _PeriodContext(
+        snapshot=snapshot,
+        risk_snapshot=risk_snap,
+        style_loading=risk_snap.style_loading(),
+        prev_weight=(
+            ctx.prev_weight[keep_idx] if ctx.prev_weight is not None else None
+        ),
+    ), alpha[keep_idx], (
+        cost_vector[keep_idx] if cost_vector is not None else None
+    )
+
+
+def target_turnover_record(
+    target: np.ndarray,
+    prev_weight: np.ndarray,
+) -> dict[str, float]:
+    """目标换手的三个口径。
+
+    - ``gross`` = Σ|w − w_prev|。因目标满仓（Σw=1）而 ``prev_weight`` 取自成交
+      账本、不含现金（Σ<1），这个值包含「把上期留存现金买回股票」那一段。
+    - ``cash_gap`` = 1 − Σw_prev，即上述现金重投所必需的买入量。
+    - ``net`` = gross − cash_gap，股票间真实调仓强度，也是与 ``max_turnover``
+      直接可比的量——该约束写作 ``gross ≤ max_turnover + cash_gap``
+      （见 :func:`hqopt.optimizer._common.turnover_terms`），等价于 ``net ≤
+      max_turnover``。用 gross 对照 max_turnover 会高估调仓强度。
+
+    目标满仓（Σw=1）时 Σ|Δw| ≥ |ΣΔw| = cash_gap，net 自然非负；优化器的
+    ``sum(w)==1`` 约束保证了这一点。``max()`` 因此既防浮点噪声，也兜住目标
+    未满仓（Σw<1，如求解降级后的残缺解）时 gross < cash_gap 的情形。
+    """
+    gross = float(np.abs(target - prev_weight).sum())
+    cash_gap = max(0.0, 1.0 - float(np.sum(prev_weight)))
+    return {
+        "gross": gross,
+        "cash_gap": cash_gap,
+        "net": max(0.0, gross - cash_gap),
+    }
+
+
+def _resolve_cost_vector(
+    inputs: _BatchInputs,
+    ctx: _PeriodContext,
+    rebal_date: date,
+) -> np.ndarray | None:
+    """个股冲击成本权重（仅在启用换手软惩罚且有上期持仓时计算）。
+
+    必须在候选池瘦身**之前**、于全池上计算：成本按池内中位数归一化，
+    换池重算会改变同一只股票的成本定价。
+    """
+    if not inputs.use_cost_vector or ctx.prev_weight is None:
+        return None
+    return build_cost_vector(
+        tickers=ctx.snapshot.tickers,
+        panel=inputs.panel,
+        target_date=rebal_date,
+    )
+
+
 def _solve_period(
     inputs: _BatchInputs,
     ctx: _PeriodContext,
     alpha: np.ndarray,
+    cost_vec: np.ndarray | None,
     rebal_date: date,
     stats: _RunStats,
 ):
     """执行当期优化；未进入求解（基准风险覆盖不足）时返回 None。"""
     prev_weight = ctx.prev_weight
-
-    # 个股冲击成本权重（仅在启用换手软惩罚时计算）
-    cost_vec = None
-    if inputs.use_cost_vector and prev_weight is not None:
-        cost_vec = build_cost_vector(
-            tickers=ctx.snapshot.tickers,
-            panel=inputs.panel,
-            target_date=rebal_date,
-        )
 
     if inputs.strategy != "index_enhance":
         return inputs.optimizer.optimize(
@@ -262,6 +360,9 @@ def _solve_period(
             risk_snapshot=ctx.risk_snapshot,
         )
 
+    # 上方 early return 已排除其他策略；_build_benchmark 保证 index_enhance
+    # 必配基准，断言把这个跨函数不变量显式化。
+    assert inputs.benchmark is not None
     bm_series = inputs.benchmark.get_weights(rebal_date, tickers=ctx.snapshot.tickers)
     bm_total = float(bm_series.sum())
     covered_weight = (
@@ -328,12 +429,11 @@ def _record_period_success(
         sell_only_tickers=sell_only.index[sell_only].tolist(),
     )
 
-    turnover = (
-        float(np.abs(w.values - prev_weight).sum()) if prev_weight is not None
-        else float("nan")
-    )
+    turnover = float("nan")
     if prev_weight is not None:
-        outcome.stats.target_turnovers.append(turnover)
+        record = target_turnover_record(w.values, prev_weight)
+        turnover = record["net"]
+        outcome.stats.target_turnover_by_period[rebal_date.isoformat()] = record
 
     n_periods = len(inputs.rebal_dates)
     if period_index % 10 == 0 or period_index == n_periods - 1:
@@ -346,7 +446,7 @@ def _record_period_success(
             )
         logger.info(
             f"  [{period_index+1:3d}/{n_periods}] {rebal_date}  "
-            f"持仓={result.n_positions:3d}  换手={turnover*100:>5.1f}%{extra}  "
+            f"持仓={result.n_positions:3d}  净换手={turnover*100:>5.1f}%{extra}  "
             f"耗时={elapsed:.2f}s"
         )
 
@@ -378,7 +478,11 @@ def _run_periods(inputs: _BatchInputs) -> _PeriodOutcome:
         if alpha is None:
             continue
 
-        result = _solve_period(inputs, ctx, alpha, rebal_date, outcome.stats)
+        cost_vec = _resolve_cost_vector(inputs, ctx, rebal_date)
+        ctx, alpha, cost_vec = _reduce_candidate_pool(
+            inputs, ctx, alpha, cost_vec, rebal_date
+        )
+        result = _solve_period(inputs, ctx, alpha, cost_vec, rebal_date, outcome.stats)
         if result is None:
             continue
 

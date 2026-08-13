@@ -269,6 +269,7 @@ class AlphaMaxOptimizer:
             vol_var = risk_quadratic_form(
                 w, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
             )
+            assert cfg.vol_upper is not None     # vol_constrained 的定义即此
             constraints.append(vol_var <= annualized_variance_cap(cfg.vol_upper))
 
         # ---- 目标：max w'α - 风险惩罚 - 成本惩罚 ----
@@ -331,6 +332,8 @@ class AlphaMaxOptimizer:
             )
         if vol_constrained:
             # 硬约束一律做求解后校验，避免"声称 σ≤20% 实则更高"的组合流入生产
+            # vol_constrained 蕴含二者非 None（上方构建约束时已校验并报错）。
+            assert risk_snapshot is not None and cfg.vol_upper is not None
             realized_vol = realized_annual_vol(
                 weights, risk_snapshot.X, risk_snapshot.F, risk_snapshot.delta
             )

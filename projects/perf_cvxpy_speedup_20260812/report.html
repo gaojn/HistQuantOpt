@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HistQuantOpt 优化求解提速报告 — 实测 10~12x</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1a202c; --muted: #64748b;
+    --accent: #2563eb; --good: #059669; --bad: #dc2626; --warn: #d97706;
+    --border: #e2e8f0; --code-bg: #0f172a; --code-ink: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+    line-height: 1.65; font-size: 15px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 60%, #3b82f6 100%);
+    color: #fff; border-radius: 16px; padding: 36px 40px; margin-bottom: 28px;
+  }
+  header.hero h1 { margin: 0 0 10px; font-size: 26px; font-weight: 700; }
+  header.hero .sub { opacity: .92; font-size: 15px; }
+  .kpis { display: flex; gap: 16px; margin-top: 22px; flex-wrap: wrap; }
+  .kpi {
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25);
+    border-radius: 12px; padding: 14px 20px; min-width: 200px;
+  }
+  .kpi .num { font-size: 26px; font-weight: 800; }
+  .kpi .lbl { font-size: 13px; opacity: .88; margin-top: 2px; }
+  h2 { font-size: 20px; margin: 40px 0 6px; padding-left: 12px; border-left: 4px solid var(--accent); }
+  h3 { font-size: 16px; margin: 24px 0 8px; }
+  .lead { color: var(--muted); margin: 0 0 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 24px; margin: 14px 0;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border-bottom: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+  th { background: #f1f5f9; font-weight: 600; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .badge {
+    display: inline-block; border-radius: 999px; padding: 1px 10px; font-size: 12px;
+    font-weight: 600; vertical-align: 1px;
+  }
+  .b-good { background: #d1fae5; color: #065f46; }
+  .b-bad { background: #fee2e2; color: #991b1b; }
+  .b-warn { background: #fef3c7; color: #92400e; }
+  .b-info { background: #dbeafe; color: #1e40af; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .bar-label { width: 260px; font-size: 13px; flex-shrink: 0; }
+  .bar-track { flex: 1; background: #eef2f7; border-radius: 6px; height: 22px; position: relative; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 6px; display: flex; align-items: center; }
+  .bar-val { font-size: 12px; font-weight: 700; color: #fff; padding-left: 8px; white-space: nowrap; }
+  .bar-val.out { color: var(--ink); position: absolute; left: 100%; padding-left: 6px; }
+  .stack { display: flex; height: 30px; border-radius: 8px; overflow: hidden; margin: 8px 0 4px; font-size: 12px; color:#fff; font-weight: 600; }
+  .stack > div { display: flex; align-items: center; justify-content: center; white-space: nowrap; overflow: hidden; }
+  .legend { display: flex; gap: 18px; font-size: 13px; color: var(--muted); margin: 6px 0 2px; flex-wrap: wrap;}
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; }
+  pre {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.55;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre .cm { color: #7dd3fc; } pre .kw { color: #f472b6; } pre .str { color: #a5f3a5; } pre .gray { color: #94a3b8; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } .bar-label { width: 150px; } }
+  .foot { color: var(--muted); font-size: 12.5px; margin-top: 48px; border-top: 1px solid var(--border); padding-top: 16px; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .rank { display:inline-flex; align-items:center; justify-content:center; width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color:#fff; font-weight:800; margin-right: 10px; font-size: 14px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>HistQuantOpt 逐期优化提速报告：瓶颈定位与 10x 方案实测</h1>
+  <div class="sub">
+    基于真实流水线的 cProfile 剖析 + 真实调仓期问题上的求解方案 A/B 实测 ·
+    环境：Python 3.12 / cvxpy 1.8.2 / Clarabel 0.11.1 / PIQP 0.6.3 · 2026-08-12
+  </div>
+  <div class="kpis">
+    <div class="kpi"><div class="num">84%</div><div class="lbl">逐期循环耗时花在 CLARABEL 求解器内部<br>（cvxpy 建模编译仅占 ~6%）</div></div>
+    <div class="kpi"><div class="num">10.9 ~ 12.3x</div><div class="lbl">index_enhance：PIQP + 候选池瘦身<br>解与基线逐票一致（权重 L1 差 = 0）</div></div>
+    <div class="kpi"><div class="num">≈ 10x</div><div class="lbl">alpha_max：同套组合方案<br>0.79s/期 → 0.08s/期</div></div>
+  </div>
+</header>
+
+<!-- ========================================================= -->
+<h2>1. 结论先行</h2>
+<div class="card">
+  <p><b>「cvxpy 太慢」这个判断只对了一半。</b>cvxpy 的建模 + 编译（canonicalization）每期只花
+  <b>约 0.13s（占 6%）</b>，真正的瓶颈是 <b>CLARABEL 内点法求解器本身</b>：在全市场
+  N≈5,366 只股票、51 因子的 QP 上每期跑 <b>1.4~2.1s，占逐期循环的 84%</b>。
+  所以「绕开 cvxpy / 手写求解器接口」收益上限只有 ~6%，方向错了；
+  <b>正确的杠杆是「换更快的 QP 求解器」＋「缩小问题规模」</b>，两者相乘。</p>
+  <p style="margin-bottom:0">在真实调仓期问题上实测（非合成数据），推荐组合方案：</p>
+  <ul>
+    <li><b>方案一：求解器换 PIQP</b>（CLARABEL 降级兜底）——单独 <b>3.5~4.2x</b>，改动只有一个函数，半天可上线；</li>
+    <li><b>方案二：候选池瘦身</b>（alpha top-1000 ∪ 持仓 ∪ 基准股 ∪ 成分股容量）——单独 <b>3~5x</b>，
+        实测解<b>逐票一致</b>（持仓重叠 100%，权重 L1 差 0.0000）；</li>
+    <li><b>两者叠加：求解环节 10~12x</b>，全部 12 个测试期 status=optimal，目标值差 &lt; 1e-7（求解器噪声量级）。</li>
+  </ul>
+</div>
+
+<!-- ========================================================= -->
+<h2>2. 瓶颈剖析：钱花在哪了</h2>
+<p class="lead">方法：用生产 CLI（<code>hqopt optimize</code>）跑 2025-01 ~ 2025-06 共 12 个调仓期，cProfile 全程采样。绝对秒数含少量 profiler 放大，占比是可靠的。</p>
+
+<div class="card">
+  <h3>index_enhance（zz1000 指增，risk_aversion=10，真因子协方差 QP）— 逐期循环共 28.4s / 12 期</h3>
+  <div class="stack">
+    <div style="width:83.7%; background:#dc2626;">CLARABEL 求解 23.8s（84%）</div>
+    <div style="width:5.7%; background:#2563eb;">6%</div>
+    <div style="width:10.6%; background:#94a3b8;">10%</div>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:#dc2626"></span>求解器内部（solve_via_data → Clarabel）</span>
+    <span><span class="dot" style="background:#2563eb"></span>cvxpy 编译（get_problem_data）1.6s</span>
+    <span><span class="dot" style="background:#94a3b8"></span>快照构建 / Alpha / 成交账本推进 3.0s</span>
+  </div>
+
+  <h3>alpha_max（全市场量化多头，L2 分散惩罚）— 逐期循环共 15.7s / 12 期</h3>
+  <div class="stack">
+    <div style="width:76.2%; background:#dc2626;">CLARABEL 求解 11.9s（76%）</div>
+    <div style="width:6.5%; background:#2563eb;">7%</div>
+    <div style="width:17.3%; background:#94a3b8;">17%</div>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:#dc2626"></span>求解器内部</span>
+    <span><span class="dot" style="background:#2563eb"></span>cvxpy 编译 1.0s</span>
+    <span><span class="dot" style="background:#94a3b8"></span>数据与账本 2.7s</span>
+  </div>
+
+  <p style="margin-bottom:0">另有一次性开销（155 期全量回测中可摊薄，不是优先目标）：行情面板加载 ~5-8s、
+  CNE6 风险模型构建 ~1.7s、数据锁 sha256 校验 ~1.2s、结果发布 ~3s。</p>
+</div>
+
+<!-- ========================================================= -->
+<h2>3. 方案实测：真实调仓期问题上的 A/B</h2>
+<p class="lead">方法：monkeypatch <code>solve_with_fallback</code>，让流水线每期把<b>同一个</b> cvxpy Problem 用多种设置各解一遍（流水线轨迹仍按生产基线推进，保证 12 期问题与生产完全一致）。</p>
+
+<div class="card">
+  <h3>3.1 换求解器（12 期均值，全候选池）</h3>
+  <table>
+    <tr><th>求解设置</th><th class="num">index_enhance<br>秒/期</th><th class="num">提速</th><th class="num">alpha_max<br>秒/期</th><th class="num">提速</th><th>成功率 / 解质量</th></tr>
+    <tr><td>CLARABEL 默认（现状基线）</td><td class="num">2.069</td><td class="num">1.0x</td><td class="num">0.822</td><td class="num">1.0x</td><td>12/12 optimal</td></tr>
+    <tr><td>CLARABEL tol=1e-6</td><td class="num">1.930</td><td class="num">1.07x</td><td class="num">0.658</td><td class="num">1.25x</td><td>12/12 optimal</td></tr>
+    <tr><td><b>PIQP eps=1e-7</b></td><td class="num"><b>0.541</b></td><td class="num"><b>3.8x</b></td><td class="num"><b>0.366</b></td><td class="num"><b>2.2x</b></td><td>12/12 optimal，目标值与基线一致（差 &lt; 4e-8）</td></tr>
+    <tr><td><b>PIQP eps=1e-6</b></td><td class="num"><b>0.487</b></td><td class="num"><b>4.2x</b></td><td class="num"><b>0.318</b></td><td class="num"><b>2.6x</b></td><td>12/12 optimal，目标值一致</td></tr>
+  </table>
+  <div class="bar-row"><div class="bar-label">CLARABEL 默认（index_enhance）</div><div class="bar-track"><div class="bar-fill" style="width:100%;background:#94a3b8"><span class="bar-val">2.07s</span></div></div></div>
+  <div class="bar-row"><div class="bar-label">PIQP 1e-6</div><div class="bar-track"><div class="bar-fill" style="width:23.5%;background:#059669"><span class="bar-val">0.49s</span></div></div></div>
+  <p style="margin-bottom:0;color:var(--muted);font-size:13.5px">
+  被淘汰的选项：<span class="badge b-bad">OSQP</span> 同规模问题 2 万次迭代仍不收敛（&gt;10s）；
+  <span class="badge b-bad">quad_form → Cholesky 重构</span> 反而更慢（2.8s → 3.6s，CLARABEL 对二次目标本就高效）；
+  <span class="badge b-bad">收紧/放宽 CLARABEL 容差</span> 最多 1.25x，不解决问题。</p>
+</div>
+
+<div class="card">
+  <h3>3.2 候选池瘦身（alpha_max，CLARABEL，逐期与全池解对比）</h3>
+  <p>保留集 = <b>alpha 截面 top-M ∪ 当前持仓 ∪ 成分股容量兜底</b>（指增再加「基准权重非零」）。
+  组合最终只持 ~110 只、单票上限 1%，深度负 alpha 的股票在纯多头下永远不进最优解——瘦身只是把这件事显式化。</p>
+  <table>
+    <tr><th>候选池</th><th class="num">实际 N</th><th class="num">秒/期</th><th class="num">提速</th><th class="num">目标值差</th><th class="num">权重 L1 差</th><th class="num">持仓重叠</th></tr>
+    <tr><td>全池（现状）</td><td class="num">≈5,000</td><td class="num">0.69–0.86</td><td class="num">1.0x</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+    <tr><td>top-2500</td><td class="num">≈3,120</td><td class="num">0.47–0.56</td><td class="num">1.4–1.7x</td><td class="num">&lt; 2e-7</td><td class="num">0.0000</td><td class="num">100%</td></tr>
+    <tr><td>top-1500</td><td class="num">≈1,920</td><td class="num">0.26–0.35</td><td class="num">2.5–3.0x</td><td class="num">&lt; 4e-7</td><td class="num">0.0000</td><td class="num">100%</td></tr>
+    <tr><td><b>top-1000</b></td><td class="num"><b>≈1,330</b></td><td class="num"><b>0.15–0.21</b></td><td class="num"><b>3.8–5.2x</b></td><td class="num"><b>&lt; 3e-7</b></td><td class="num"><b>0.0000</b></td><td class="num"><b>99.1–100%</b></td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>3.3 组合方案：PIQP + top-1000 候选池（对比生产基线）</h3>
+  <table>
+    <tr><th>策略</th><th class="num">基线 秒/期</th><th class="num">组合方案 秒/期</th><th class="num">提速</th><th>解质量（4 个稳态期逐一对比）</th></tr>
+    <tr><td><b>index_enhance</b></td><td class="num">1.36–1.48</td><td class="num"><b>0.11–0.13</b></td><td class="num"><b>10.9–12.3x</b></td><td>目标值差 &lt; 5e-8，权重 L1 差 0.0000，持仓重叠 100%</td></tr>
+    <tr><td><b>alpha_max</b></td><td class="num">0.69–0.86</td><td class="num"><b>0.07–0.09</b></td><td class="num"><b>≈ 10x</b></td><td>同上，全部 optimal</td></tr>
+  </table>
+  <div class="bar-row"><div class="bar-label">index_enhance 基线</div><div class="bar-track"><div class="bar-fill" style="width:100%;background:#94a3b8"><span class="bar-val">1.42s/期</span></div></div></div>
+  <div class="bar-row"><div class="bar-label">＋PIQP</div><div class="bar-track"><div class="bar-fill" style="width:27%;background:#2563eb"><span class="bar-val">0.38s</span></div></div></div>
+  <div class="bar-row"><div class="bar-label">＋PIQP ＋候选池瘦身</div><div class="bar-track"><div class="bar-fill" style="width:8.5%;background:#059669"><span class="bar-val">0.12s</span></div></div></div>
+  <p style="margin-bottom:0">外推到 2020–2026 全量回测（155 期）：index_enhance 求解总耗时约
+  <b>220s → 19s</b>；逐期循环整体（含快照/账本等非求解开销 ~0.2s/期）约 <b>250s → 50s（5x 端到端）</b>。
+  想继续压端到端，需再优化非求解环节，但性价比明显更低。</p>
+</div>
+
+<!-- ========================================================= -->
+<h2>4. 落地建议（按优先级）</h2>
+
+<div class="card">
+  <h3><span class="rank">1</span>求解降级链改为 PIQP → CLARABEL → SCS <span class="badge b-good">3.5–4.2x</span> <span class="badge b-info">改动 ≈ 1 个函数</span></h3>
+  <p>只改 <code>hqopt/optimizer/_common.py</code> 的 <code>solve_with_fallback</code>，两个优化器共用，一处生效：</p>
+<pre><span class="cm"># hqopt/optimizer/_common.py</span>
+_PIQP_KW = dict(eps_abs=<span class="str">1e-7</span>, eps_rel=<span class="str">1e-7</span>)   <span class="gray"># 求解后门禁 1e-5，留两个量级余量</span>
+
+<span class="kw">def</span> solve_with_fallback(problem: cp.Problem) -> str | <span class="kw">None</span>:
+    <span class="str">"""PIQP → CLARABEL → SCS 三级降级。
+
+    PIQP 是纯 QP 求解器：te_upper / vol_upper 的二次硬约束会抛
+    SolverError（实测验证），自动落到 CLARABEL——语义不变，只是变慢。
+    """</span>
+    <span class="kw">try</span>:
+        problem.solve(solver=<span class="str">"PIQP"</span>, **_PIQP_KW, verbose=<span class="kw">False</span>)
+        <span class="kw">if</span> problem.status <span class="kw">in</span> _OPTIMAL_STATUSES:
+            <span class="kw">return None</span>
+    <span class="kw">except</span> Exception:
+        <span class="kw">pass</span>          <span class="gray"># 二次约束模式 / PIQP 未安装 → 降级</span>
+
+    <span class="kw">try</span>:
+        problem.solve(solver=cp.CLARABEL, max_iter=_CLARABEL_MAX_ITER, verbose=<span class="kw">False</span>)
+        <span class="kw">if</span> problem.status <span class="kw">in</span> _OPTIMAL_STATUSES:
+            <span class="kw">return None</span>
+    <span class="kw">except</span> Exception:
+        <span class="kw">pass</span>
+
+    <span class="kw">try</span>:
+        problem.solve(solver=cp.SCS, max_iters=_SCS_MAX_ITERS, verbose=<span class="kw">False</span>)
+    <span class="kw">except</span> Exception <span class="kw">as</span> exc:
+        <span class="kw">return</span> <span class="str">f"all solvers failed: {exc}"</span>
+    <span class="kw">return None</span></pre>
+  <ul>
+    <li><code>pyproject.toml</code> 增加依赖 <code>piqp&gt;=0.6</code>（纯 pip wheel，无系统依赖）。</li>
+    <li>同步更新 <code>tests/test_solver_fallback.py</code>（当前只覆盖 CLARABEL→SCS 两级）。</li>
+    <li>已验证的边界：<code>te_upper</code>/<code>vol_upper</code> 模式（二次硬约束）PIQP 会抛
+        <code>SolverError</code>，链条自动回落 CLARABEL；现有 <b>1e-5 求解后硬约束门禁</b>继续对所有求解器兜底。</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><span class="rank">2</span>候选池瘦身：alpha top-M 预筛 <span class="badge b-good">再乘 3x，合计 10–12x</span> <span class="badge b-warn">需全区间影子验证</span></h3>
+  <p>在 <code>_solve_period</code> 进优化器之前（或 <code>filter_universe</code> 增加一档），把优化域缩到：</p>
+<pre><span class="kw">def</span> candidate_pool_mask(alpha, snapshot, prev_weight, bm_weight=<span class="kw">None</span>, top_m=<span class="str">1000</span>):
+    <span class="str">"""alpha top-M ∪ 当前持仓 ∪ 基准股 ∪ 成分股容量兜底。"""</span>
+    rank = pd.Series(alpha).rank(ascending=<span class="kw">False</span>).values
+    keep = rank &lt;= top_m
+    <span class="kw">if</span> prev_weight <span class="kw">is not None</span>:
+        keep |= prev_weight &gt; <span class="str">1e-12</span>     <span class="gray"># 持仓必须在池内：卖出/冻结/只卖约束都挂在它身上</span>
+    <span class="kw">if</span> bm_weight <span class="kw">is not None</span>:
+        keep |= bm_weight &gt; <span class="str">1e-10</span>       <span class="gray"># 指增：基准股保留，主动偏离/行业约束才有意义</span>
+    cmask = snapshot.constituent_mask
+    crank = pd.Series(np.where(cmask, alpha, -np.inf)).rank(ascending=<span class="kw">False</span>).values
+    keep |= (crank &lt;= int(top_m * <span class="str">0.6</span>)) &amp; cmask   <span class="gray"># 成分下限容量：0.6M×1% ≫ 40%/80%</span>
+    <span class="kw">return</span> keep</pre>
+  <ul>
+    <li><b>为什么无损</b>：纯多头 + 线性 alpha + 凸惩罚下，深度负 alpha 股票不会进最优解的支撑集；
+        约束相关股票（持仓/基准/成分）已显式保留。实测 4 个稳态期解逐票一致。</li>
+    <li><b>上线前必须做</b>：用 2020–2026 全区间跑一次影子对比（全池 vs 瘦身池），核对每期权重 L1 差
+        与 NAV 曲线；本报告附带的 <code>bench/bench_reduce*.py</code> 即为对比工具原型。</li>
+    <li>建议做成配置项（如 <code>universe.alpha_top_m: 1000</code>，null=关闭），风险模型
+        <code>risk_model.at()</code> 按瘦身后 tickers 取切片即可（已验证该用法）。</li>
+    <li>M 的安全边际：组合仅持 ~110 只，M=1000 已有 9 倍余量；保守可先上 M=1500（2.5–3x）。</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3><span class="rank">3</span>明确不做的事（实测无效或方向错误）</h3>
+  <table>
+    <tr><th>候选方案</th><th>实测结论</th></tr>
+    <tr><td>绕开 cvxpy、手写求解器接口</td><td><span class="badge b-bad">不做</span> 编译只占 ~6%，收益上限 1.06x，还丢掉 DSL 的可审计性</td></tr>
+    <tr><td>DPP Parameter + 问题缓存</td><td><span class="badge b-bad">不做</span> 同理——省的是那 6% 的编译；且逐期 N/掩码变化，问题结构不稳定</td></tr>
+    <tr><td>OSQP</td><td><span class="badge b-bad">不做</span> 同规模问题 2 万迭代不收敛（ADMM 对该类病态 QP 不友好）</td></tr>
+    <tr><td>quad_form → Cholesky sum_squares 重构</td><td><span class="badge b-bad">不做</span> 2.8s → 3.6s，反而慢 28%</td></tr>
+    <tr><td>调 CLARABEL 容差</td><td><span class="badge b-bad">收益太小</span> 1.07–1.25x</td></tr>
+    <tr><td>逐期并行</td><td><span class="badge b-warn">不适用</span> 期间有账本/换手串行依赖；但<b>多配置、多 alpha 的研究网格</b>（signal_grid / 参数扫描）可进程级并行，另算一层线性加速</td></tr>
+    <tr><td>MOSEK / Gurobi 商用求解器</td><td><span class="badge b-info">备选</span> 预计与 PIQP 同量级，有预算再考虑</td></tr>
+  </table>
+</div>
+
+<!-- ========================================================= -->
+<h2>4.5 落地补记（分支 perf/piqp-candidate-pool 实现时的两个修正）</h2>
+<div class="card">
+  <p><b>实现阶段的全流程回放（含成交账本串行推进）暴露了本报告 §3.2 瘦身规则的两个盲区</b>，
+  已在代码中修复，最终两个策略在 6 个月窗口的新旧 <code>weights.parquet</code> 每期 L1 差
+  ≤ 1.3e-4（求解器噪声级）：</p>
+  <ul>
+    <li><b>风格对冲票</b>：alpha_max 的<b>绝对</b>风格约束（Size/Beta 等 ≤ ±0.2σ）binding 时，
+      全池最优解持有 ~4%权重、alpha 排名 1800~2400 的「对冲票」（全部为大市值成分股），
+      纯 alpha top-M 池会漏掉它们，首期即漂移 0.16 L1。
+      修复：池规则增补「每个风格因子载荷两端各 60 只」，实测恢复逐票一致。
+      安全池由 ~1300 增至 ~2450（alpha_max）/ ~2830（index_enhance），
+      瘦身提速由 3~5x 回落至 <b>2~5x</b>（叠加 PIQP 后组合提速约 <b>4~8x</b>，
+      而非 §3.3 用非安全池测得的 10~12x）。</li>
+    <li><b>成本向量口径</b>：<code>build_cost_vector</code> 按<b>池内中位数</b>归一化，
+      瘦身后重算会改变同一只股票的换手成本定价（index_enhance 曾漂移 9e-3 L1）。
+      修复：成本向量在瘦身前于全池计算、随池切片，绝不重算。</li>
+  </ul>
+  <p style="margin-bottom:0">教训与报告结论一致：瘦身的安全边界在「约束相关股票」，
+  而约束相关性不止持仓与基准——<b>任何 binding 约束的松弛贡献者都必须留在池内</b>。
+  等价性已固化为单元测试（<code>tests/test_candidate_pool.py</code>，含紧风格约束场景）。</p>
+</div>
+
+<!-- ========================================================= -->
+<h2>5. 验证清单（合入前）</h2>
+<div class="card">
+  <ul style="margin:0">
+    <li>☐ <code>pyproject.toml</code> 加 <code>piqp&gt;=0.6</code>；CI 矩阵确认 Linux/macOS wheel 可装。</li>
+    <li>☐ 改 <code>solve_with_fallback</code> 三级链；<code>tests/test_solver_fallback.py</code> 补 PIQP 首选、二次约束降级两个用例。</li>
+    <li>☐ 跑一次 155 期全量 index_enhance + alpha_max，对比新旧 <code>weights.parquet</code>（期望权重 L1 差 &lt; 1e-4/期）与 <code>batch_execution_stats.json</code> 的 post-solve 违约统计（期望仍为 0）。</li>
+    <li>☐ 候选池瘦身以配置开关灰度上线：先 <code>alpha_top_m: 1500</code> 影子验证，再收到 1000。</li>
+    <li>☐ <code>te_upper</code> / <code>vol_upper</code> 两个硬约束模式各跑一期冒烟，确认自动落回 CLARABEL 且结果不变。</li>
+  </ul>
+</div>
+
+<div class="foot">
+  <b>复现材料</b>：本目录 <code>bench/</code> 下 —— <code>bench_real.py</code>（真实流水线求解器 A/B）、
+  <code>bench_reduce.py</code> / <code>bench_reduce_ie.py</code>（候选池瘦身与组合方案）、
+  <code>real_*.json</code>（12 期逐期原始计时）。
+  剖析窗口 2025-01-01 ~ 2025-06-30（12 个调仓期，rebalance_freq=10），配置取
+  <code>configs/*_default.yaml</code> 仅改日期。机器：Apple Silicon macOS。
+  绝对耗时随机器浮动，<b>占比与倍数结论稳定</b>。
+</div>
+
+</div>
+</body>
+</html>

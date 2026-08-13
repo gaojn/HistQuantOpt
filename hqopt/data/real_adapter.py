@@ -281,6 +281,8 @@ class RealMarketAdapter:
         # 惰性初始化 / 面板变化时重建缓存
         if self._adv_cache is None or self._adv_cache_panel_id != id(panel):
             self._build_adv_cache(panel)
+        # _build_adv_cache 无条件填充缓存；断言把这个后置条件显式化。
+        assert self._adv_cache is not None
 
         # as-of：每只 code 取 date <= target_date 的最近一行 adv
         adv_series = (

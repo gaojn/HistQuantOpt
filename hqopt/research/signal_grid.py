@@ -168,7 +168,9 @@ class SignalGridRunner:
         autocorrs: list[float] = []
         turns: list[float] = []
         prev_alpha: pd.Series | None = None
-        prev_top: set | None = None
+        # 空集而非 None：只在 prev_alpha 非 None（即已有上一期）时读取，
+        # 初始值永不参与计算，用 Optional 只会逼调用点做无意义的判空。
+        prev_top: set = set()
 
         for dt in self.rebal_dates:
             if dt not in alpha_df.index:

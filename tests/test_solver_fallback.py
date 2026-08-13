@@ -1,11 +1,12 @@
-"""求解器降级路径测试：CLARABEL → SCS → 双双失败。
+"""求解器降级路径测试：PIQP → CLARABEL → SCS → 全部失败。
 
 这条链路平时不触发，但一旦悄悄坏掉，表现形式往往是"业绩变好"而不是报错——
 求解失败若被当成正常结果返回，会得到一个全零或半成品权重向量，回测照跑不误。
-因此单独守护两条契约：
+因此单独守护三条契约：
 
-1. ``solve_with_fallback``：CLARABEL 抛异常或返回非最优时必须真的再试 SCS；
-   两个求解器都抛异常时如实返回失败原因，绝不吞掉。
+1. ``solve_with_fallback``：PIQP 首选（纯 QP 求解器，全市场规模实测快 3~4 倍）；
+   遇到非 QP 结构（如 te_upper/vol_upper 的二次硬约束）或异常时必须降级
+   CLARABEL，再降级 SCS；全部抛异常时如实返回失败原因，绝不吞掉。
 2. 两个优化器：拿到失败原因或非最优状态时必须返回 **不可行结果**
    （``is_feasible=False``、权重全零、目标值 NaN），供
    ``batch_optimize._run_periods`` 跳过该期并计入失败期数。
@@ -34,10 +35,27 @@ def snap():
     return MarketDataGenerator(n_stocks=40, seed=0).generate()
 
 
-def _trivial_problem(n: int = 10) -> cp.Problem:
-    """一个有解的小凸问题，用于观察降级过程本身。"""
+def _trivial_qp(n: int = 10) -> cp.Problem:
+    """一个有解的小 QP（二次目标 + 线性约束），PIQP 可直接求解。"""
+    w = cp.Variable(n, nonneg=True)
+    return cp.Problem(
+        cp.Maximize(np.arange(n) @ w - cp.sum_squares(w)), [cp.sum(w) == 1.0]
+    )
+
+
+def _non_qp_problem(n: int = 10) -> cp.Problem:
+    """一个有解但无法化为 QP 的凸问题（sqrt 目标），PIQP 必然拒绝。"""
     w = cp.Variable(n, nonneg=True)
     return cp.Problem(cp.Maximize(cp.sum(cp.sqrt(w))), [cp.sum(w) == 1.0])
+
+
+def _quad_constraint_problem(n: int = 10) -> cp.Problem:
+    """带二次硬约束的问题——te_upper / vol_upper 模式的最小复刻。"""
+    w = cp.Variable(n, nonneg=True)
+    return cp.Problem(
+        cp.Maximize(cp.sum(w)),
+        [cp.sum(w) == 1.0, cp.sum_squares(w) <= 0.5],
+    )
 
 
 def _infeasible_problem(n: int = 10) -> cp.Problem:
@@ -69,44 +87,71 @@ def _spy_solver(monkeypatch, *, raise_on: tuple = ()) -> list:
 # ── solve_with_fallback 本身 ──────────────────────────────────────
 
 
-def test_clarabel_exception_falls_back_to_scs(monkeypatch):
-    """CLARABEL 抛异常 → 吞掉异常改用 SCS，最终仍取到最优解。"""
-    calls = _spy_solver(monkeypatch, raise_on=(cp.CLARABEL,))
-    problem = _trivial_problem()
+def test_piqp_solves_qp_without_fallback(monkeypatch):
+    """QP 问题（默认软惩罚配置的结构）应由 PIQP 一次解决，不触发降级。"""
+    calls = _spy_solver(monkeypatch)
+    problem = _trivial_qp()
 
     failure = _common.solve_with_fallback(problem)
 
-    assert calls == [cp.CLARABEL, cp.SCS], "CLARABEL 失败后必须真的再试 SCS"
+    assert calls == [cp.PIQP], "QP 问题不应降级——降级说明 PIQP 首选路径坏了"
+    assert failure is None
+    assert problem.status in ("optimal", "optimal_inaccurate")
+
+
+def test_non_qp_structure_falls_back_to_clarabel(monkeypatch):
+    """无法化为 QP 的问题（如 te_upper/vol_upper 的二次硬约束）→ 降级 CLARABEL。
+
+    cvxpy 对 PIQP 抛 SolverError，链条必须吞掉并继续，语义不变只是变慢。
+    """
+    calls = _spy_solver(monkeypatch)
+    problem = _quad_constraint_problem()
+
+    failure = _common.solve_with_fallback(problem)
+
+    assert calls == [cp.PIQP, cp.CLARABEL]
+    assert failure is None
+    assert problem.status in ("optimal", "optimal_inaccurate")
+
+
+def test_clarabel_exception_falls_back_to_scs(monkeypatch):
+    """PIQP 拒绝、CLARABEL 抛异常 → 仍要真的再试 SCS，取到最优解。"""
+    calls = _spy_solver(monkeypatch, raise_on=(cp.CLARABEL,))
+    problem = _non_qp_problem()
+
+    failure = _common.solve_with_fallback(problem)
+
+    assert calls == [cp.PIQP, cp.CLARABEL, cp.SCS], "CLARABEL 失败后必须真的再试 SCS"
     assert failure is None, "SCS 成功时不应上报失败原因"
     assert problem.status in ("optimal", "optimal_inaccurate")
 
 
-def test_clarabel_non_optimal_falls_back_to_scs(monkeypatch):
-    """CLARABEL 不抛异常但返回非最优状态，同样要降级重试。
+def test_non_optimal_status_falls_through_all_solvers(monkeypatch):
+    """求解器不抛异常但返回非最优状态，必须逐级降级到底。
 
-    只判异常不判 status 的写法会在这里静默停在 CLARABEL 的劣质解上。
+    只判异常不判 status 的写法会在这里静默停在首个求解器的劣质解上。
     """
     calls = _spy_solver(monkeypatch)
     problem = _infeasible_problem()
 
     failure = _common.solve_with_fallback(problem)
 
-    assert calls == [cp.CLARABEL, cp.SCS]
+    assert calls == [cp.PIQP, cp.CLARABEL, cp.SCS]
     # SCS 未抛异常 → 不算"求解器失败"，由调用方按 status 判定不可行
     assert failure is None
     assert problem.status not in ("optimal", "optimal_inaccurate")
 
 
-def test_both_solvers_fail_returns_reason(monkeypatch):
-    """两个求解器都抛异常时必须如实返回原因，不得吞掉。"""
-    calls = _spy_solver(monkeypatch, raise_on=(cp.CLARABEL, cp.SCS))
-    problem = _trivial_problem()
+def test_all_solvers_fail_returns_reason(monkeypatch):
+    """全部求解器都抛异常时必须如实返回原因，不得吞掉。"""
+    calls = _spy_solver(monkeypatch, raise_on=(cp.PIQP, cp.CLARABEL, cp.SCS))
+    problem = _trivial_qp()
 
     failure = _common.solve_with_fallback(problem)
 
-    assert calls == [cp.CLARABEL, cp.SCS]
+    assert calls == [cp.PIQP, cp.CLARABEL, cp.SCS]
     assert failure is not None
-    assert failure.startswith("both solvers failed:")
+    assert failure.startswith("all solvers failed:")
     assert "boom" in failure, "失败原因应保留底层异常信息，便于定位"
 
 
@@ -140,7 +185,7 @@ def test_solver_failure_yields_infeasible_result(monkeypatch, snap, kind):
     module = f"hqopt.optimizer.{kind}"
     monkeypatch.setattr(
         f"{module}.solve_with_fallback",
-        lambda problem: "both solvers failed: boom",
+        lambda problem: "all solvers failed: boom",
     )
 
     res = _optimize(kind, snap)
@@ -172,7 +217,7 @@ def test_ie_infeasible_result_has_no_benchmark(monkeypatch, snap):
     """指增不可行结果不携带基准权重 → active_weight 为 None 而非虚假零偏离。"""
     monkeypatch.setattr(
         "hqopt.optimizer.index_enhance.solve_with_fallback",
-        lambda problem: "both solvers failed: boom",
+        lambda problem: "all solvers failed: boom",
     )
 
     res = _optimize("index_enhance", snap)
@@ -228,11 +273,11 @@ def test_optimal_inaccurate_is_not_trusted_without_postcheck(
 
 @pytest.mark.parametrize("kind", ["index_enhance", "alpha_max"])
 def test_scs_fallback_must_also_pass_postcheck(monkeypatch, snap, kind):
-    """CLARABEL 异常后采用 SCS；仅在全部硬约束残差过门时才可发布。"""
-    calls = _spy_solver(monkeypatch, raise_on=(cp.CLARABEL,))
+    """PIQP/CLARABEL 均异常后采用 SCS；仅在全部硬约束残差过门时才可发布。"""
+    calls = _spy_solver(monkeypatch, raise_on=(cp.PIQP, cp.CLARABEL))
 
     result = _optimize(kind, snap)
 
-    assert calls == [cp.CLARABEL, cp.SCS]
+    assert calls == [cp.PIQP, cp.CLARABEL, cp.SCS]
     assert result.is_feasible
     assert max(result.constraint_violations.values()) <= _common.POST_SOLVE_ABS_TOL

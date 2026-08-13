@@ -157,6 +157,11 @@ PENDING_BUY / FILLED / EXPIRED` 状态。每个执行日只对 pending 股票按
 非冻结权重。单票 <1e-6 的求解器粉尘仅在累计也 ≤1e-6 时清零，否则保留，
 避免改变冻结仓位、放大上限约束或累计破坏下限约束；微小预算缺口保留为现金。
 
+**本节语义由 golden 回归守护**：`tests/test_golden_backtest.py` 用注入了停牌、涨停、
+跌停、退市与 sell-only 的合成面板跑完整回测，把绩效指标、执行统计和整条净值序列
+锁定到 `tests/golden/backtest_baseline.json`。上述任一执行口径变化都会使其失败，
+需显式重生成基线并在 CHANGELOG 登记需重跑范围（流程见 README「Golden 回归基线」）。
+
 ---
 
 ## 6. 模块结构

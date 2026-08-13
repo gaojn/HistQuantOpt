@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import date
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from hqopt.backtest.execution import (
     sell_only_path_for_weights,
     validate_sell_only_manifest,
 )
+from hqopt.pipeline.batch.periods import target_turnover_record
 
 
 class _FakeRiskSnapshot:
@@ -811,7 +813,9 @@ def test_zero_variance_alpha_skips_only_affected_period(
     stats = json.loads(
         (tmp_path / "batch_execution_stats.json").read_text(encoding="utf-8")
     )
-    assert stats["optimization"] == {
+    optimization = dict(stats["optimization"])
+    target_turnover = optimization.pop("target_turnover")
+    assert optimization == {
         "candidate_period_count": 2,
         "failed_period_count": 1,
         "successful_period_count": 1,
@@ -823,11 +827,43 @@ def test_zero_variance_alpha_skips_only_affected_period(
             "max_violation_by_period": {},
         },
     }
+    # 唯一成功的一期就是首期，没有「上期」可比，故不产生目标换手记录。
+    assert target_turnover["by_period"] == {}
+    assert math.isnan(target_turnover["net_mean"])
     assert stats["alpha_quality"]["skipped_period_count"] == 1
     assert stats["alpha_quality"]["zero_variance_period_count"] == 1
     assert stats["alpha_quality"]["as_of_by_period"] == {
         "2024-01-02": "2024-01-02"
     }
+
+
+@pytest.mark.parametrize(
+    ("target", "prev", "expected"),
+    [
+        # 上期满仓：无现金重投，net == gross
+        ([0.5, 0.5], [1.0, 0.0], {"gross": 1.0, "cash_gap": 0.0, "net": 1.0}),
+        # 上期留 20% 现金：gross=|0.5-0.8|+|0.5-0|=0.8，其中 0.2 是必需的现金重投
+        ([0.5, 0.5], [0.8, 0.0], {"gross": 0.8, "cash_gap": 0.2, "net": 0.6}),
+        # 纯建仓（上期空仓）：全部 gross 都是现金投入，净调仓为 0
+        ([0.5, 0.5], [0.0, 0.0], {"gross": 1.0, "cash_gap": 1.0, "net": 0.0}),
+        # 权重完全不动但留有现金：gross 只反映现金缺口，净调仓为 0
+        ([0.45, 0.45], [0.45, 0.45], {"gross": 0.0, "cash_gap": 0.1, "net": 0.0}),
+    ],
+)
+def test_target_turnover_record_excludes_mandatory_cash_reinvestment(
+    target, prev, expected
+):
+    """目标换手必须区分「现金重投」与「股票间调仓」。
+
+    优化器的换手约束是 ``gross ≤ max_turnover + cash_gap``，即真正受限的是
+    net。若报告用 gross 对照 max_turnover，会系统性高估调仓强度。
+    """
+    record = target_turnover_record(np.array(target), np.array(prev))
+    assert record["gross"] == pytest.approx(expected["gross"])
+    assert record["cash_gap"] == pytest.approx(expected["cash_gap"])
+    assert record["net"] == pytest.approx(expected["net"])
+    # net 恒非负，且不超过 gross
+    assert 0.0 <= record["net"] <= record["gross"] + 1e-12
 
 
 def test_alpha_standardization_can_be_disabled(tmp_path, monkeypatch):

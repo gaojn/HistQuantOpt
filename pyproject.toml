@@ -15,7 +15,8 @@ dependencies = [
     "pandas>=2.0",
     "pyyaml",
     "cvxpy>=1.4",        # 凸优化（顶层 import hqopt 即需要）
-    "clarabel>=0.7",     # CLARABEL solver
+    "piqp>=0.6",         # 一级 QP 求解器（solve_with_fallback 首选，实测比 CLARABEL 快 3~4 倍）
+    "clarabel>=0.7",     # CLARABEL solver（二级；te_upper/vol_upper 二次约束模式的主力）
     "plotly>=5.0",       # HTML 报告
 ]
 
@@ -24,6 +25,7 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",   # CI 覆盖率门禁
     "ruff",
+    "mypy>=1.11",        # CI 类型门禁（配置见 [tool.mypy]）
 ]
 
 [project.scripts]
@@ -58,6 +60,16 @@ ignore = [
     # 对已发布的 order_states JSON 是无谓风险。
     "UP042",
 ]
+
+[tool.mypy]
+# 只查生产代码。tests/ 大量使用替身对象与 duck typing（如把 _RecordingLedger
+# 传给形参标注为 ExecutionLedger 的函数），纳入检查收益低、噪音大。
+files = ["hqopt", "scripts"]
+# numpy / pandas / polars / cvxpy / plotly 未随包提供完整类型信息。
+ignore_missing_imports = true
+# polars 的 Series.min()/max() stub 返回类型包含 bytes，而导出脚本格式化的是
+# 日期与数值列，不存在 f"{b'..'}" 插值风险；此检查在本项目只产生误报。
+disable_error_code = ["str-bytes-safe"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
