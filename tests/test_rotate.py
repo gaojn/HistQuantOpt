@@ -187,6 +187,9 @@ def test_buy_blocked_by_limit_up_open_leaves_cash():
     result, stats, trades = _run(picks, frames, hold_days=2)
 
     assert stats["buy_fail_count"] == 1
+    assert stats["buy_fail_breakdown"] == {
+        "limit_up_open": 1, "suspended": 0, "no_quote": 0,
+    }
     buys = trades[trades["side"] == "buy"]
     assert buys["code"].tolist() == ["B"]
     # A 的份额留现金：只买入了 B 的一半仓位
@@ -204,6 +207,7 @@ def test_buy_blocked_by_suspension():
     result, stats, _ = _run(picks, frames, hold_days=2)
 
     assert stats["buy_fail_count"] == 1
+    assert stats["buy_fail_breakdown"]["suspended"] == 1
     assert result.nav.iloc[-1] == pytest.approx(1.0, abs=1e-12)
 
 
@@ -231,6 +235,9 @@ def test_sell_blocked_by_limit_down_defers_to_next_day():
     _, stats, trades = _run(picks, frames, hold_days=2)
 
     assert stats["sell_defer_count"] == 1
+    assert stats["sell_defer_breakdown"] == {
+        "limit_down_close": 1, "suspended": 0, "no_price": 0,
+    }
     sells = trades[trades["side"].str.startswith("sell")]
     assert len(sells) == 1
     assert sells.iloc[0]["side"] == "sell_deferred"

@@ -270,14 +270,14 @@ class RotateBacktester:
             px_adj = open_adj.get(code)
             px_raw = open_px.get(code)
             if pd.isna(px_adj) or pd.isna(px_raw) or px_adj <= 0:
-                state.buy_fail_count += 1        # 无行情（未上市/退市/代码错误）
+                state.buy_fail_no_quote += 1     # 无行情（未上市/退市/代码错误）
                 continue
             if status.get(code) == _SUSPENDED:
-                state.buy_fail_count += 1
+                state.buy_fail_suspended += 1
                 continue
             up = limit_up.get(code)
             if pd.notna(up) and px_raw >= up * _LIMIT_UP_TOL:
-                state.buy_fail_count += 1        # 开盘涨停，放弃
+                state.buy_fail_limit_up += 1     # 开盘涨停，放弃
                 continue
 
             notional = alloc / (1.0 + self.cost_buy)   # 含费出资 = alloc
@@ -361,14 +361,14 @@ class RotateBacktester:
                 px_adj = close_adj.get(code)
                 px_raw = close_px.get(code)
                 if pd.isna(px_adj) or px_adj <= 0:
-                    state.sell_defer_count += 1  # 行在但无真实价（长停等），顺延
+                    state.sell_defer_no_price += 1   # 行在但无真实价（长停等），顺延
                     continue
                 if status.get(code) == _SUSPENDED:
-                    state.sell_defer_count += 1
+                    state.sell_defer_suspended += 1
                     continue
                 down = limit_down.get(code)
                 if pd.notna(down) and pd.notna(px_raw) and px_raw <= down * _LIMIT_DOWN_TOL:
-                    state.sell_defer_count += 1  # 收盘跌停，顺延
+                    state.sell_defer_limit_down += 1  # 收盘跌停，顺延
                     continue
 
                 shares = bucket.holdings.pop(code)
@@ -491,7 +491,17 @@ class RotateBacktester:
         return {
             "hold_days": self.hold_days,
             "buy_fail_count": state.buy_fail_count,
+            "buy_fail_breakdown": {
+                "limit_up_open": state.buy_fail_limit_up,    # 开盘涨停
+                "suspended": state.buy_fail_suspended,       # 停牌
+                "no_quote": state.buy_fail_no_quote,         # 无行情
+            },
             "sell_defer_count": state.sell_defer_count,
+            "sell_defer_breakdown": {                        # 按被阻断天数计
+                "limit_down_close": state.sell_defer_limit_down,  # 收盘跌停
+                "suspended": state.sell_defer_suspended,          # 停牌
+                "no_price": state.sell_defer_no_price,            # 行在但无价
+            },
             "delist_forced_count": state.delist_forced_count,
             "no_cash_skip_days": state.no_cash_skip_days,
             "unexecutable_signal_days": [
@@ -519,11 +529,27 @@ class _ReplayState:
     cash: float
     equity: float                                  # 上一收盘总资产（建仓预算基准）
     buckets: list[_Bucket] = field(default_factory=list)
-    buy_fail_count: int = 0
-    sell_defer_count: int = 0
+    buy_fail_suspended: int = 0      # T+1 停牌买不进
+    buy_fail_limit_up: int = 0       # T+1 开盘涨停买不进
+    buy_fail_no_quote: int = 0       # T+1 无行情（未上市/退市/代码错误）
+    sell_defer_limit_down: int = 0   # 收盘跌停卖不出（按被阻断天数计）
+    sell_defer_suspended: int = 0    # 停牌卖不出（按被阻断天数计）
+    sell_defer_no_price: int = 0     # 行在但无真实价（按被阻断天数计）
     delist_forced_count: int = 0
     no_cash_skip_days: int = 0
     unexecutable_signals: list = field(default_factory=list)
+
+    @property
+    def buy_fail_count(self) -> int:
+        return self.buy_fail_suspended + self.buy_fail_limit_up + self.buy_fail_no_quote
+
+    @property
+    def sell_defer_count(self) -> int:
+        return (
+            self.sell_defer_limit_down
+            + self.sell_defer_suspended
+            + self.sell_defer_no_price
+        )
 
 
 @dataclass
