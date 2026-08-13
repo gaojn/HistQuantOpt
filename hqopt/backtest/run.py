@@ -24,6 +24,7 @@ from hqopt.backtest.execution import (
     normalize_sell_only_matrix,
     sell_only_manifest_path_for_weights,
     sell_only_path_for_weights,
+    synthetic_alpha_warning_path_for_weights,
     validate_sell_only_manifest,
 )
 from hqopt.backtest.report import generate_html_report
@@ -137,17 +138,23 @@ def _parse_date(s: str | date | pd.Timestamp) -> date:
 
 
 def _detect_warning_banner(weight_path: str | Path) -> str | None:
-    """权重同目录存在合成 Alpha 警告文件时，报告必须携带水印。
+    """权重 bundle 带合成 Alpha 警告文件时，报告必须携带水印。
 
-    优化阶段（batch.publish）会在合成 Alpha 运行的权重旁落
+    优化阶段（batch.publish）会在合成 Alpha 运行的权重旁落按 stem 隔离的
     SYNTHETIC_ALPHA_WARNING.txt；回测端据此自动接上 HTML 置顶横幅，
-    避免"含前视信号的漂亮报告"被无提示地截图外传。
+    避免"含前视信号的漂亮报告"被无提示地截图外传。目录级旧水印文件也
+    保守地一并触发（宁可误报，不可漏报）。
     """
-    warning_file = Path(weight_path).resolve().parent / SYNTHETIC_ALPHA_WARNING_FILE
-    if not warning_file.is_file():
-        return None
-    text = warning_file.read_text(encoding="utf-8").strip()
-    return text or SYNTHETIC_ALPHA_WARNING_TEXT
+    weights = Path(weight_path).resolve()
+    candidates = [
+        synthetic_alpha_warning_path_for_weights(weights),
+        weights.parent / SYNTHETIC_ALPHA_WARNING_FILE,   # 旧版目录级布局
+    ]
+    for warning_file in candidates:
+        if warning_file.is_file():
+            text = warning_file.read_text(encoding="utf-8").strip()
+            return text or SYNTHETIC_ALPHA_WARNING_TEXT
+    return None
 
 
 def run_backtest(
@@ -184,7 +191,9 @@ def run_backtest(
     alpha_path  : 报告"最后一期目标持仓"表 Alpha 列用的 alpha parquet 路径，
                   None 时该列显示"—"
     warning_banner : HTML 报告置顶风险水印文本。None（默认）时自动探测：
-                  权重同目录存在 SYNTHETIC_ALPHA_WARNING.txt 即取其内容
+                  权重 bundle 带 SYNTHETIC_ALPHA_WARNING.txt 即取其内容。
+                  注意空字符串 "" 会显式关闭探测与水印——仅当确认权重
+                  绝无前视信号时才可传入
 
     Returns
     -------

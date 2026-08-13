@@ -31,6 +31,11 @@
 - **运行清单质量检查增补**（`io/run_manifest.py`）：顶层
   `quality_checks` 加入 `alpha_quality`（synthetic / 陈旧 / 跳过 / 零方差
   期数）与 `benchmark_quality`（来源 / 回退期数），审计不再需要翻逐期日志。
+- **复核修补**（独立 agent 复核后）：水印文件按权重 stem 隔离
+  （`synthetic_alpha_warning_path_for_weights`，标准布局 `weights.parquet`
+  文件名不变）——目录级单文件在同目录多 bundle 布局下，真实 Alpha 发布会
+  摘掉合成 bundle 的水印（漏报）；旧目录级水印文件在回测端保守触发。
+  预加载 `alpha_df` 路径同样校验文件前视标记，不能因 early return 绕过。
 
 ### 性能：执行账本卖出循环向量化（500 持仓场景 18×）+ 数据链路四处热点
 

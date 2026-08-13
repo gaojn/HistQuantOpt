@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hqopt.constants import LIMIT_TOL
+from hqopt.constants import LIMIT_TOL, SYNTHETIC_ALPHA_WARNING_FILE
 
 MAX_EXECUTION_ATTEMPTS = 3
 LEGACY_SELL_ONLY_MANIFEST_VERSION = 1
@@ -53,6 +53,19 @@ def batch_execution_stats_path_for_weights(weight_path: str | Path) -> Path:
     if weights.stem == "weights":
         return weights.parent / "batch_execution_stats.json"
     return weights.with_name(f"{weights.stem}.batch_execution_stats.json")
+
+
+def synthetic_alpha_warning_path_for_weights(weight_path: str | Path) -> Path:
+    """返回权重 bundle 对应的合成 Alpha 水印文件路径。
+
+    与 stats 文件同样按 stem 隔离：目录级单文件在"同目录多 bundle"布局下，
+    后发布的真实 Alpha bundle 会把先前合成 bundle 的水印 unlink 掉（漏报）。
+    标准布局（stem == "weights"）保持目录级文件名不变。
+    """
+    weights = Path(weight_path)
+    if weights.stem == "weights":
+        return weights.parent / SYNTHETIC_ALPHA_WARNING_FILE
+    return weights.with_name(f"{weights.stem}.{SYNTHETIC_ALPHA_WARNING_FILE}")
 
 
 def bundle_in_progress_path_for_weights(weight_path: str | Path) -> Path:

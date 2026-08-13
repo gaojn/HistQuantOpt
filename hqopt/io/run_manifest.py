@@ -450,6 +450,7 @@ def expected_run_artifacts(
         batch_execution_stats_path_for_weights,
         sell_only_manifest_path_for_weights,
         sell_only_path_for_weights,
+        synthetic_alpha_warning_path_for_weights,
     )
 
     weights = Path(weights_path).resolve()
@@ -470,7 +471,7 @@ def expected_run_artifacts(
                 "turnover.parquet",
             )
         )
-    warning = weights.parent / "SYNTHETIC_ALPHA_WARNING.txt"
+    warning = synthetic_alpha_warning_path_for_weights(weights)
     if warning.is_file():
         artifacts.append(warning)
     missing = [path for path in artifacts if not path.is_file()]

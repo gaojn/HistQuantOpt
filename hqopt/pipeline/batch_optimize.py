@@ -105,20 +105,31 @@ def _load_alpha_matrix(
 ) -> tuple[pd.DataFrame, bool]:
     """校验 Alpha 元数据后加载/接收矩阵，并返回 synthetic 标记。"""
     alpha_source, synthetic_alpha = _validate_alpha_config(alpha_cfg)
+
+    # 文件自带的前视标记优先于配置声明校验：即使矩阵已预加载（alpha_df
+    # 非 None），只要配置声明来源是该文件，就不允许"声明 false + 文件
+    # 标记 true"的组合绕过（可信度声明只能加严不能放松）。
+    alpha_path = alpha_cfg.get("path")
+    if (
+        alpha_source == "file"
+        and alpha_path
+        and Path(alpha_path).is_file()
+    ):
+        marker = alpha_panel_synthetic_marker(alpha_path)
+        if marker and not synthetic_alpha:
+            raise ValueError(
+                f"Alpha 文件 {alpha_path} 自带前视标记"
+                "（parquet metadata synthetic=true），但配置声明"
+                " alpha.synthetic=false。可信度声明只能加严不能放松：请改用"
+                " synthetic=true 运行，或换用不含前视的因子文件"
+            )
+
     if alpha_df is not None:
         logger.info("\n[2] 使用预加载 Alpha 矩阵")
         return alpha_df, synthetic_alpha
 
     if alpha_source == "file":
         logger.info(f"\n[2] 读取外部 Alpha：{alpha_cfg['path']}")
-        marker = alpha_panel_synthetic_marker(alpha_cfg["path"])
-        if marker and not synthetic_alpha:
-            raise ValueError(
-                f"Alpha 文件 {alpha_cfg['path']} 自带前视标记"
-                "（parquet metadata synthetic=true），但配置声明"
-                " alpha.synthetic=false。可信度声明只能加严不能放松：请改用"
-                " synthetic=true 运行，或换用不含前视的因子文件"
-            )
         return load_alpha_panel(alpha_cfg["path"]), synthetic_alpha
     generated_alpha = build_synthetic_alpha(
         panel,
