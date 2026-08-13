@@ -454,11 +454,16 @@ def _build_holdings_table(
         return "", None
 
     target_date = last_date.date() if hasattr(last_date, "date") else last_date
-    panel = load_panel(
-        target_date, target_date,
-        columns=["code", "date", "name", "industry_l1", "total_mv"],
-        cache_dir=cache_dir,
-    ).to_pandas().set_index("code")
+    try:
+        panel = load_panel(
+            target_date, target_date,
+            columns=["code", "date", "name", "industry_l1", "total_mv"],
+            cache_dir=cache_dir,
+        ).to_pandas().set_index("code")
+    except FileNotFoundError:
+        # 行情缓存缺失（如 CI/新环境）时降级：只展示代码与权重，
+        # 名称/行业/市值显示"—"，不让整份报告失败。
+        panel = pd.DataFrame(columns=["name", "industry_l1", "total_mv"])
 
     df = pd.DataFrame({"weight": holdings})
     df["name"] = panel["name"].reindex(df.index).fillna("—")

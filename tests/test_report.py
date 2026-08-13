@@ -208,6 +208,23 @@ def test_build_holdings_table_joins_name_industry_market_cap_alpha(monkeypatch):
     assert row["alpha"] == pytest.approx(-0.567)
 
 
+def test_build_holdings_table_degrades_without_market_cache(monkeypatch):
+    """行情缓存缺失（CI/新环境）时降级为代码+权重，名称/行业/市值显示—，不报错。"""
+    def raise_missing(*args, **kwargs):
+        raise FileNotFoundError("缺少本地缓存")
+
+    monkeypatch.setattr(report_module, "load_panel", raise_missing)
+    result = _result_with_holdings()
+
+    html, df = _build_holdings_table(result)
+
+    assert df is not None
+    assert set(df["code"]) == {"SZ000001", "SZ000002", "SZ000003"}
+    assert (df["name"] == "—").all()
+    assert df["mv_yi"].isna().all()
+    assert "SZ000001" in html
+
+
 def test_build_holdings_table_alpha_dash_without_alpha_path(monkeypatch):
     """未提供 alpha_path 时 Alpha 列全部显示—，不报错。"""
     monkeypatch.setattr(
